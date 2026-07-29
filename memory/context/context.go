@@ -3,6 +3,10 @@
 // ContextManager 管理 Agent 的对话历史与上下文压缩。它记录每个 TurnItem，
 // 在推理前提供标准化历史，并在 token 超限时触发压缩。
 // 设计 ContextManager + Compactor。
+//
+// 此包包含核心接口（ContextManager、Compactor、TokenEstimator）和共享类型
+// （TurnItem、CompactResult）。默认实现位于 memory/context/heuristic.go
+// （HeuristicContextManager）和 memory/compactor/（TruncatingCompactor 等）。
 package context
 
 import "context"
@@ -68,4 +72,23 @@ type ToolCallRef struct {
 	ID string
 	Name string
 	Arguments map[string]any
+}
+
+// Compactor 是上下文压缩器接口。
+//
+// 默认实现包括 TruncatingCompactor（memory/compactor 包）、
+// SummaryCompactor（memory/compactor 包，待实现）。
+type Compactor interface {
+	// Compact 压缩 items，返回压缩结果。
+	Compact(c context.Context, items []TurnItem, maxTokens int) (*CompactResult, error)
+}
+
+// TokenEstimator 估算 token 数量。
+//
+// 默认实现为 HeuristicEstimator（memory/compactor 包）或
+// DefaultHeuristicEstimator（memory/context 包）。
+// 第三方可提供基于实际 tokenizer 的实现。
+type TokenEstimator interface {
+	Estimate(text string) int
+	EstimateFromItems(items []TurnItem) int
 }

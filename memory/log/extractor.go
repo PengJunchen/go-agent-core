@@ -17,6 +17,25 @@ type LogExtractor interface {
 	ExtractToFile(ctx context.Context, filter *LogFilter, outputPath string) error
 }
 
+// ExtractConfig 是 JSONLLogExtractor 的配置选项。
+type ExtractConfig struct {
+	// MaxScanBufferSize 是 scanner 的最大缓冲区大小（字节）。
+	// 默认值：1MB（1048576）。
+	MaxScanBufferSize int `json:"max_scan_buffer_size"`
+
+	// MaxLineSize 是单行日志的最大长度（字节）。超长行被跳过。
+	// 默认值：1MB（1048576）。
+	MaxLineSize int `json:"max_line_size"`
+}
+
+// DefaultExtractConfig 返回默认的 ExtractConfig。
+func DefaultExtractConfig() ExtractConfig {
+	return ExtractConfig{
+		MaxScanBufferSize: 64 * 1024,
+		MaxLineSize: 1024 * 1024,
+	}
+}
+
 // LogFilter 是日志过滤条件。
 type LogFilter struct {
 	Categories []LogCategory

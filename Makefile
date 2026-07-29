@@ -36,7 +36,7 @@ scan:
 
 ## test-log: 日志核心验证（VQ/VS/VT/VC/VH 规则）
 test-log:
-	go test ./memory/log/... -run "V[QSVTCH]" -v
+	go test ./memory/log/... -run "^Test(V[QSVTCH]_)" -v
 
 ## test-leak: Goroutine 泄漏检测（AssertNoGoroutineLeak）
 test-leak:

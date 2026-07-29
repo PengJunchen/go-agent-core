@@ -7,14 +7,15 @@ import (
 	memctx "github.com/pengjunchen/go-agent-core/memory/context"
 )
 
-// Compactor 接口测试：TruncatingCompactor 实现 Compactor 接口。
+// Compactor 接口测试：TruncatingCompactor 实现 memory/context.Compactor 接口。
 func TestTruncatingCompactor_Interface(t *testing.T) {
-	var _ Compactor = TruncatingCompactor{}
+	var _ memctx.Compactor = TruncatingCompactor{}
 }
 
-// VT-001: 截断压缩后 token 数应低于 maxTokens。
-func TestTruncatingCompactor_TruncatesBelowMax(t *testing.T) {
-	c := TruncatingCompactor{Estimator: HeuristicEstimator{}}
+// VQ-001: 截断压缩后 token 数应低于 maxTokens。
+func TestVQ001_TruncatesBelowMax(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
+	c := TruncatingCompactor{Estimator: e}
 	items := []memctx.TurnItem{
 		{Role: "user", Content: "这是一段很长的文本用于测试截断压缩，需要足够长才能触发截断逻辑"},
 		{Role: "assistant", Content: "另一段中等长度的回复文本"},
@@ -39,9 +40,10 @@ func TestTruncatingCompactor_TruncatesBelowMax(t *testing.T) {
 	}
 }
 
-// VT-002: 不需要截断时保留全部。
-func TestTruncatingCompactor_NoTruncationNeeded(t *testing.T) {
-	c := TruncatingCompactor{Estimator: HeuristicEstimator{}}
+// VQ-002: 不需要截断时保留全部。
+func TestVQ002_NoTruncationNeeded(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
+	c := TruncatingCompactor{Estimator: e}
 	items := []memctx.TurnItem{
 		{Role: "user", Content: "短"},
 	}
@@ -57,9 +59,9 @@ func TestTruncatingCompactor_NoTruncationNeeded(t *testing.T) {
 	}
 }
 
-// VT-003: HeuristicEstimator 估算合理（char/4）。
-func TestHeuristicEstimator_Estimate(t *testing.T) {
-	e := HeuristicEstimator{}
+// VQ-003: HeuristicTokenEstimator 估算合理（char/4 for English）。
+func TestVQ003_HeuristicTokenEstimatorEnglish(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
 	if got := e.Estimate("hello world!"); got != 3 { // 12/4=3
 		t.Errorf("Estimate(\"hello world!\") = %d, want 3", got)
 	}
@@ -72,4 +74,110 @@ func TestHeuristicEstimator_Estimate(t *testing.T) {
 	if got := e.EstimateFromItems(items); got != 5 {
 		t.Errorf("EstimateFromItems = %d, want 5", got)
 	}
+}
+
+// VQ-004: HeuristicTokenEstimator 对空输入估算为 0。
+func TestVQ004_EstimatorEmptyInput(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
+	if got := e.Estimate(""); got != 0 {
+		t.Errorf("Estimate(\"\") = %d, want 0", got)
+	}
+	items := []memctx.TurnItem{
+		{Role: "user", Content: ""},
+	}
+	if got := e.EstimateFromItems(items); got != 0 {
+		t.Errorf("EstimateFromItems empty = %d, want 0", got)
+	}
+}
+
+// VQ-005: HeuristicTokenEstimator 计算包含 ThinkingContent。
+func TestVQ005_EstimatorWithThinking(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
+	items := []memctx.TurnItem{
+		{Role: "assistant", Content: "hello", ThinkingContent: "long thinking process here"}, // 5/4 + 27/4 = 1+6 = 7
+	}
+	if got := e.EstimateFromItems(items); got != 7 {
+		t.Errorf("EstimateFromItems with thinking = %d, want 7", got)
+	}
+}
+
+// VQ-006: TruncatingCompactor 使用默认 Estimate（当 Estimator 为 nil 时）。
+func TestVQ006_DefaultEstimator(t *testing.T) {
+	c := TruncatingCompactor{} // nil Estimator -> fallback to HeuristicTokenEstimator
+	items := []memctx.TurnItem{
+		{Role: "user", Content: "hello world"}, // 11/4=2
+		{Role: "assistant", Content: "this is a longer response text"}, // 33/4=8
+		{Role: "user", Content: "short"}, // 5/4=1
+	}
+	result, err := c.Compact(context.Background(), items, 5)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if result.BeforeTokens != 10 {
+		t.Errorf("BeforeTokens = %d, want 10", result.BeforeTokens)
+	}
+	if result.ItemsRemoved <= 0 {
+		t.Error("expected items to be removed")
+	}
+}
+
+// VQ-007: TruncatingCompactor 单个条目应保留。
+func TestVQ007_SingleItem(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
+	c := TruncatingCompactor{Estimator: e}
+	items := []memctx.TurnItem{
+		{Role: "user", Content: "single"},
+	}
+	result, err := c.Compact(context.Background(), items, 0)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if result.ItemsRemoved != 0 {
+		t.Errorf("expected 0 removed, got %d", result.ItemsRemoved)
+	}
+	if len(result.RetainedItems) != 1 {
+		t.Errorf("expected 1 retained, got %d", len(result.RetainedItems))
+	}
+	if result.BeforeTokens != 1 {
+		t.Errorf("BeforeTokens = %d, want 1", result.BeforeTokens)
+	}
+}
+
+// VS-001: Context 取消应尽早返回。
+func TestVS001_ContextCancel(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
+	c := TruncatingCompactor{Estimator: e}
+	items := []memctx.TurnItem{
+		{Role: "user", Content: "hello"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消
+	result, err := c.Compact(ctx, items, 5)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result should not be nil")
+	}
+}
+
+// VS-002: 空 items 返回空结果。
+func TestVS002_EmptyItems(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
+	c := TruncatingCompactor{Estimator: e}
+	result, err := c.Compact(context.Background(), []memctx.TurnItem{}, 100)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if result.BeforeTokens != 0 {
+		t.Errorf("BeforeTokens = %d, want 0", result.BeforeTokens)
+	}
+	if len(result.RetainedItems) != 0 {
+		t.Errorf("RetainedItems should be empty, got %d", len(result.RetainedItems))
+	}
+}
+
+// VS-003: HeuristicTokenEstimator 接口编译检查。
+func TestVS003_EstimatorInterface(t *testing.T) {
+	var _ memctx.TokenEstimator = (*HeuristicTokenEstimator)(nil)
 }
