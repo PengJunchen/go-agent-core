@@ -64,6 +64,7 @@ type JSONLSessionStore struct {
 	filePath string
 	sessions map[string]*Session
 	byContextID map[string]*Session // contextID → Session
+	sink SessionSink // 可选：持久化委托给 SessionSink
 }
 
 // NewJSONLSessionStore 创建一个指定文件路径的 JSONLSessionStore。
@@ -321,6 +322,21 @@ func (s *JSONLSessionStore) appendDeleteEntry(ctx context.Context, sessionID str
 
 // appendEntry 序列化并追加一条 JSONL 条目到文件（带超时保护）。
 func (s *JSONLSessionStore) appendEntry(ctx context.Context, entryType string, data any) error {
+	// 优先委托给 SessionSink（热冷分离：Sink 管冷路径持久化）
+	if s.sink != nil {
+		sessID := ""
+		if sd, ok := data.(interface{ GetSessionID() string }); ok {
+			sessID = sd.GetSessionID()
+		}
+		if err := s.sink.Append(ctx, SessionEntry{
+			EntryType: entryType,
+			SessionID: sessID,
+			Data: data,
+		}); err != nil {
+			// Sink 失败不阻断主流程，降级到本地文件
+		}
+	}
+
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("persist %s: %w", entryType, ctx.Err())
@@ -480,4 +496,10 @@ func newSessionID() string {
 		hex.EncodeToString(b[6:8]) + "-" +
 		hex.EncodeToString(b[8:10]) + "-" +
 		hex.EncodeToString(b[10:])
+}
+
+// SetSink 设置可选的 SessionSink。设置后，所有持久化操作同时委托给 Sink。
+// SessionSink 管冷路径（全量落盘+重建），SessionStore 管热路径（内存缓存+文件持久化）。
+func (s *JSONLSessionStore) SetSink(sink SessionSink) {
+	s.sink = sink
 }

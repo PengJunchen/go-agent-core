@@ -44,6 +44,8 @@ type LogFilter struct {
 	EndTime *time.Time
 	Actions []string
 	HasError *bool
+	Tags []string
+	Level LogLevel
 	Limit int
 }
 
@@ -82,6 +84,28 @@ func (f *LogFilter) Matches(e *ExecLogEntry) bool {
 	if f.HasError != nil {
 		hasErr := e.Error != ""
 		if *f.HasError != hasErr {
+			return false
+		}
+	}
+	// Level 过滤
+	if f.Level != "" && e.Level != f.Level {
+		return false
+	}
+	// Tags 过滤（包含任一指定 tag 即匹配）
+	if len(f.Tags) > 0 {
+		hit := false
+		for _, want := range f.Tags {
+			for _, got := range e.Tags {
+				if got == want {
+					hit = true
+					break
+				}
+			}
+			if hit {
+				break
+			}
+		}
+		if !hit {
 			return false
 		}
 	}

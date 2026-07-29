@@ -2,6 +2,8 @@
 package stream
 
 import (
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -105,5 +107,57 @@ func TestBoundedEventChannel_DefaultSize(t *testing.T) {
 	defer func() { _ = ch.Close() }()
 	if ch.Cap() != 256 {
 		t.Errorf("expected default cap 256, got %d", ch.Cap())
+	}
+}
+
+// TestBoundedEventChannel_ConcurrentSend 验证多 goroutine 并发发送的线程安全。
+func TestBoundedEventChannel_ConcurrentSend(t *testing.T) {
+	ch := NewBoundedEventChannel(64, DropOldest)
+	defer func() { _ = ch.Close() }()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				ch.Send(StreamEvent{Type: StreamTextDelta, Content: "x"})
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 消费前关闭通道，否则 Next 永远阻塞
+	_ = ch.Close()
+
+	// 消费所有事件，不应 panic 或死锁
+	count := 0
+	for {
+		_, ok := ch.Next()
+		if !ok {
+			break
+		}
+		count++
+		if count > 10000 {
+			t.Fatal("too many events")
+		}
+	}
+	// DropOldest 策略下，丢弃数 = 发送数 - 消费数
+	if ch.Dropped()+int64(count) != 1000 {
+		t.Errorf("dropped(%d) + consumed(%d) != sent(1000)", ch.Dropped(), count)
+	}
+}
+
+// TestBoundedEventChannel_SetErr 验证 SetErr 关闭通道。
+func TestBoundedEventChannel_SetErr(t *testing.T) {
+	ch := NewBoundedEventChannel(10, DropOldest)
+	err := fmt.Errorf("test error")
+	ch.SetErr(err)
+	if ch.Err() == nil {
+		t.Error("expected error to be set")
+	}
+	// SetErr 应关闭通道
+	if ch.Send(StreamEvent{Type: StreamTextDelta}) {
+		t.Error("Send after SetErr should fail")
 	}
 }

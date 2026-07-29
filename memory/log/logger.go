@@ -57,6 +57,8 @@ type ExecLogEntry struct {
 	Category LogCategory `json:"category"`
 	Action string `json:"action"`
 	Payload map[string]any `json:"payload"`
+	Tags []string `json:"tags,omitempty"`
+	Level LogLevel `json:"level,omitempty"`
 	Duration int64 `json:"duration_ms"`
 	Error string `json:"error,omitempty"`
 }
@@ -72,6 +74,16 @@ const (
 	LogCategoryAgent LogCategory = "agent"
 	LogCategoryHITL LogCategory = "hitl"
 	LogCategorySystem LogCategory = "system"
+)
+
+// LogLevel 枚举日志级别。
+type LogLevel string
+
+const (
+	LogLevelDebug LogLevel = "debug"
+	LogLevelInfo LogLevel = "info"
+	LogLevelWarn LogLevel = "warn"
+	LogLevelError LogLevel = "error"
 )
 
 // ─── 三轨专用记录类型 ────────────────────────────────────────────
@@ -155,8 +167,24 @@ func NewEntry(category LogCategory, action, sessionID, turnID string) *ExecLogEn
 		TurnID: turnID,
 		Category: category,
 		Action: action,
+		Level: LogLevelInfo,
 		Payload: make(map[string]any),
 	}
+}
+
+// WithTags 设置标签。
+func (e *ExecLogEntry) WithTags(tags ...string) *ExecLogEntry {
+	e.Tags = append(e.Tags, tags...)
+	return e
+}
+
+// WithLevel 设置日志级别。
+func (e *ExecLogEntry) WithLevel(l LogLevel) *ExecLogEntry {
+	e.Level = l
+	if l == LogLevelError && e.Error == "" {
+		e.Error = "error_level"
+	}
+	return e
 }
 
 // NewTurnRecord 构造一条 Turn 记录。

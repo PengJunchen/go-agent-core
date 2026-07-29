@@ -59,6 +59,9 @@ func NewScanner() *Scanner {
 		s.ruleIFACE002(),
 		s.ruleIFACE003(),
 		s.ruleSCAN010(),
+		s.ruleSCAN011(),
+		s.ruleSCAN012(),
+		s.ruleSCAN013(),
 	}
 	return s
 }
@@ -248,4 +251,148 @@ func FormatViolations(violations []Violation) string {
 			v.RuleID, v.Severity, v.File, v.Line, v.Message))
 	}
 	return sb.String()
+}
+
+// ─── SCAN-011: 工具事件泄露检测 ──────────────────────────────────
+//
+// 工具执行结果必须通过 ToolHook 管道发射事件，不得直接写 EventStream。
+func (s *Scanner) ruleSCAN011() ScanRule {
+	return ScanRule{
+		ID: "SCAN-011",
+		Severity: SeverityError,
+		Check: func(file *ast.File, path string) []Violation {
+			if !strings.Contains(path, "agent/") && !strings.Contains(path, "capability/") {
+				return nil
+			}
+			if strings.Contains(path, "toolhook") {
+				return nil
+			}
+			var violations []Violation
+			ast.Inspect(file, func(n ast.Node) bool {
+				comp, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				for _, elt := range comp.Elts {
+					kv, ok := elt.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					ident, ok := kv.Key.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					if ident.Name == "Type" {
+						basic, ok := kv.Value.(*ast.BasicLit)
+						if ok {
+							val := strings.Trim(basic.Value, `"`)
+							if val == "tool_result" || val == "tool_call" {
+								violations = append(violations, Violation{
+									RuleID: "SCAN-011",
+									Severity: SeverityError,
+									File: path,
+									Line: s.fset.Position(comp.Pos()).Line,
+									Message: fmt.Sprintf("tool event %q must be emitted via ToolHook pipeline, not directly constructed", val),
+								})
+							}
+						}
+					}
+				}
+				return true
+			})
+			return violations
+		},
+	}
+}
+
+// ─── SCAN-012: 日志绕过检测 ─────────────────────────────────────────
+//
+// LLM 调用和工具调用必须经过 ExecLogger。
+func (s *Scanner) ruleSCAN012() ScanRule {
+	return ScanRule{
+		ID: "SCAN-012",
+		Severity: SeverityError,
+		Check: func(file *ast.File, path string) []Violation {
+			if !strings.Contains(path, "agent/") {
+				return nil
+			}
+			var violations []Violation
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if sel.Sel.Name == "Generate" || sel.Sel.Name == "StreamChat" {
+					if strings.HasSuffix(path, "_test.go") {
+						return true
+					}
+					violations = append(violations, Violation{
+						RuleID: "SCAN-012",
+						Severity: SeverityError,
+						File: path,
+						Line: s.fset.Position(call.Pos()).Line,
+						Message: fmt.Sprintf("direct LLM call %s() bypasses ExecLogger — use agent method that logs", sel.Sel.Name),
+					})
+				}
+				return true
+			})
+			return violations
+		},
+	}
+}
+
+// ─── SCAN-013: 接口实现完整性检测 ───────────────────────────────────
+//
+// 声明的接口必须有测试覆盖。
+func (s *Scanner) ruleSCAN013() ScanRule {
+	return ScanRule{
+		ID: "SCAN-013",
+		Severity: SeverityWarning,
+		Check: func(file *ast.File, path string) []Violation {
+			if strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			if strings.Contains(path, "adapter/") || strings.Contains(path, "verify/") {
+				return nil
+			}
+			var violations []Violation
+			ifaceNames := map[string]bool{}
+			for _, decl := range file.Decls {
+				gen, ok := decl.(*ast.GenDecl)
+				if !ok || gen.Tok != token.TYPE {
+					continue
+				}
+				for _, spec := range gen.Specs {
+					ts, ok := spec.(*ast.TypeSpec)
+					if !ok {
+						continue
+					}
+					if _, isIface := ts.Type.(*ast.InterfaceType); isIface {
+						ifaceNames[ts.Name.Name] = true
+					}
+				}
+			}
+			if len(ifaceNames) == 0 {
+				return nil
+			}
+			dir := filepath.Dir(path)
+			testFiles, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
+			if err != nil || len(testFiles) == 0 {
+				for name := range ifaceNames {
+					violations = append(violations, Violation{
+						RuleID: "SCAN-013",
+						Severity: SeverityWarning,
+						File: path,
+						Line: s.fset.Position(file.Pos()).Line,
+						Message: fmt.Sprintf("interface %q has no test file in same directory", name),
+					})
+				}
+			}
+			return violations
+		},
+	}
 }

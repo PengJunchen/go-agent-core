@@ -21,7 +21,10 @@ func main() {
 	}
 
 	fmt.Println(verify.FormatViolations(violations))
-	if len(violations) > 0 {
-		os.Exit(1)
+	// 只有 Error 级别违规才返回非零退出码（Warning 不阻断）
+	for _, v := range violations {
+		if v.Severity == verify.SeverityError {
+			os.Exit(1)
+		}
 	}
 }

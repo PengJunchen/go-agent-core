@@ -88,6 +88,7 @@ func (sel LogSelector) toLogFilter() *LogFilter {
 		StartTime: sel.Since,
 		EndTime: sel.Until,
 		Limit: sel.Limit,
+		Tags: sel.Tags,
 	}
 	// Types → Categories 映射
 	catMap := map[string][]LogCategory{
@@ -101,13 +102,21 @@ func (sel LogSelector) toLogFilter() *LogFilter {
 			f.Categories = append(f.Categories, cats...)
 		}
 	}
-	// Levels → HasError 简化
+	// Levels → LogLevel 字段
 	for _, l := range sel.Levels {
-		if l == "error" {
+		switch l {
+		case "debug":
+			f.Level = LogLevelDebug
+		case "info":
+			f.Level = LogLevelInfo
+		case "warn":
+			f.Level = LogLevelWarn
+		case "error":
 			t := true
 			f.HasError = &t
-			break
+			f.Level = LogLevelError
 		}
+		break
 	}
 	return f
 }

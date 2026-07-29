@@ -109,6 +109,16 @@ type ModelProvider interface {
 	if err := os.WriteFile(filepath.Join(dir, "provider.go"), []byte(code), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	// 加测试文件，避免 SCAN-013 警告
+	testCode := `package provider
+
+import "testing"
+
+func TestModelProvider(t *testing.T) {}
+`
+	if err := os.WriteFile(filepath.Join(dir, "provider_test.go"), []byte(testCode), 0o644); err != nil {
+		t.Fatalf("write test: %v", err)
+	}
 	scanner := NewScanner()
 	violations, err := scanner.ScanDir(dir)
 	if err != nil {

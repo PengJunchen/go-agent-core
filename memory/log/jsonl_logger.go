@@ -44,6 +44,7 @@ type JSONLExecLogger struct {
 	mu sync.Mutex
 	trackWriters map[string]*trackWriter // key: "sessions" | "runs" | "events"
 	flushCancel context.CancelFunc
+	flushWg sync.WaitGroup // 确保 interval goroutine 退出完成
 }
 
 // trackWriter 是单个轨道的写入器。
@@ -102,6 +103,7 @@ func NewJSONLExecLoggerWithConfig(cfg LogConfig) (*JSONLExecLogger, error) {
 	if cfg.FlushMode == "interval" && cfg.FlushIntervalMs > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
 		l.flushCancel = cancel
+		l.flushWg.Add(1)
 		go l.intervalFlush(ctx)
 	}
 
@@ -194,14 +196,18 @@ func (l *JSONLExecLogger) Flush(ctx context.Context) error {
 // Close 关闭所有轨道（关闭前自动 Flush）。
 func (l *JSONLExecLogger) Close() error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
+		l.mu.Unlock()
 		return nil
 	}
 	l.closed = true
 	if l.flushCancel != nil {
 		l.flushCancel()
 	}
+	l.mu.Unlock()
+		l.flushWg.Wait() // 等待 interval goroutine 退出
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	var firstErr error
 	for _, tw := range l.trackWriters {
 		if tw.writer != nil {
@@ -259,6 +265,20 @@ func (l *JSONLExecLogger) writeTrack(ctx context.Context, track string, data []b
 	return nil
 }
 
+// rotatedFileName 生成轮转后的文件名（如 exec_2026-07-29.jsonl → exec_2026-07-29.1.jsonl）。
+func (tw *trackWriter) rotatedFileName(cfg LogConfig) string {
+	base := strings.TrimSuffix(tw.current, ".jsonl")
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("%s.%d.jsonl", base, i)
+		if _, err := os.Stat(filepath.Join(tw.dir, name)); os.IsNotExist(err) {
+			return name
+		}
+		if i > 100 {
+			return name // 防止无限循环
+		}
+	}
+}
+
 // ensureWriter 确保 trackWriter 的 writer 指向正确日期的文件（调用方持锁）。
 func (tw *trackWriter) ensureWriter(cfg LogConfig) error {
 	dateStr := time.Now().UTC().Format("2006-01-02")
@@ -267,11 +287,13 @@ func (tw *trackWriter) ensureWriter(cfg LogConfig) error {
 		// 检查大小轮转
 		if cfg.RotationBySizeEnabled && tw.fd != nil {
 			if fi, err := tw.fd.Stat(); err == nil && fi.Size() >= cfg.MaxFileSize {
-				if len(name) > len(tw.current)+1 && name[len(name)-6] == '.' {
-					// 已轮转过的，构造下一个编号
-				}
+				// 关闭当前文件，生成轮转文件名
 				_ = tw.writer.Flush()
 				_ = tw.fd.Close()
+				// 重命名当前文件为 .1, .2, ...
+				oldPath := filepath.Join(tw.dir, tw.current)
+				rotatedName := tw.rotatedFileName(cfg)
+				_ = os.Rename(oldPath, filepath.Join(tw.dir, rotatedName))
 				tw.fd = nil
 				tw.writer = nil
 				tw.current = ""
@@ -305,12 +327,18 @@ func (l *JSONLExecLogger) crash(err error) error {
 		return err
 	}
 	msg := fmt.Sprintf("%s %v\n", time.Now().UTC().Format(time.RFC3339Nano), err)
-	_ = os.WriteFile(l.crashLog, []byte(msg), 0o600)
+	// append 模式写入，避免并发 crash 互相覆盖
+	f, ferr := os.OpenFile(l.crashLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if ferr == nil {
+		_, _ = f.WriteString(msg)
+		_ = f.Close()
+	}
 	return err
 }
 
 // intervalFlush 后台定时刷盘 goroutine。
 func (l *JSONLExecLogger) intervalFlush(ctx context.Context) {
+	defer l.flushWg.Done()
 	ticker := time.NewTicker(time.Duration(l.cfg.FlushIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
 	for {
