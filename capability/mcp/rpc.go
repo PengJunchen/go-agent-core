@@ -113,6 +113,7 @@ func (b *baseTransport) ensureInit(ctx context.Context) error {
 		return nil
 	}
 	initReq := &rpcRequest{
+		JSONRPC: "2.0",
 		ID: nextID(),
 		Method: "initialize",
 		Params: initializeParams{
@@ -128,7 +129,7 @@ func (b *baseTransport) ensureInit(ctx context.Context) error {
 	if resp.Error != nil {
 		return fmt.Errorf("mcp initialize: %w", resp.Error)
 	}
-	if err := b.conn.notify(ctx, &rpcNotification{Method: "notifications/initialized"}); err != nil {
+	if err := b.conn.notify(ctx, &rpcNotification{JSONRPC: "2.0", Method: "notifications/initialized"}); err != nil {
 		return fmt.Errorf("mcp initialized notification: %w", err)
 	}
 	b.inited = true
@@ -150,7 +151,7 @@ func (b *baseTransport) ListTools(ctx context.Context) ([]Tool, error) {
 	}
 	ctx, cancel := b.withTimeout(ctx)
 	defer cancel()
-	resp, err := b.conn.call(ctx, &rpcRequest{ID: nextID(), Method: "tools/list"})
+	resp, err := b.conn.call(ctx, &rpcRequest{JSONRPC: "2.0", ID: nextID(), Method: "tools/list"})
 	if err != nil {
 		return nil, fmt.Errorf("mcp tools/list: %w", err)
 	}
@@ -172,6 +173,7 @@ func (b *baseTransport) Call(ctx context.Context, toolName string, args json.Raw
 	ctx, cancel := b.withTimeout(ctx)
 	defer cancel()
 	resp, err := b.conn.call(ctx, &rpcRequest{
+		JSONRPC: "2.0",
 		ID: nextID(),
 		Method: "tools/call",
 		Params: toolsCallParams{Name: toolName, Arguments: args},
