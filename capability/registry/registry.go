@@ -12,6 +12,8 @@ type ToolDefinition struct {
 	Description string
 	Parameters map[string]any // JSON Schema
 	Handler ToolHandler
+	ParallelSafe bool // 标记该工具可安全并行调用
+	ValidateArgs bool // 标记该工具的参数需要校验
 }
 
 // ToolHandler 是工具的执行函数。

@@ -35,7 +35,18 @@ const (
 	EventCompactEnd
 	// EventApprovalRequest 审批请求。
 	EventApprovalRequest
+	// EventToolExecutionUpdate 工具执行状态更新。
+	EventToolExecutionUpdate
 )
+
+// ToolExecutionUpdate 是 EventToolExecutionUpdate 事件的载荷。
+type ToolExecutionUpdate struct {
+	ToolCallID string
+	ToolName string
+	Status string // "started", "progress", "completed", "failed"
+	Progress float64 // 0.0 - 1.0，可选进度指示
+	Message string // 可选状态消息
+}
 
 // AgentEvent 是一个 Agent 事件。
 type AgentEvent struct {
