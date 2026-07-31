@@ -205,7 +205,7 @@ func (l *JSONLExecLogger) Close() error {
 		l.flushCancel()
 	}
 	l.mu.Unlock()
-		l.flushWg.Wait() // 等待 interval goroutine 退出
+	l.flushWg.Wait() // 等待 interval goroutine 退出
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var firstErr error

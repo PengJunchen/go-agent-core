@@ -378,7 +378,7 @@ func (s *JSONLSessionStore) writeToFile(ctx context.Context, data []byte) error 
 			done <- fmt.Errorf("open file: %w", err)
 			return
 		}
-		defer f.Close() //nolint:errcheck // append-only close
+		defer func() { _ = f.Close() }() // append-only 写入，关闭错误无需处理
 
 		if _, err := f.Write(data); err != nil {
 			done <- fmt.Errorf("write file: %w", err)
@@ -404,7 +404,7 @@ func (s *JSONLSessionStore) loadFromFile() error {
 		}
 		return fmt.Errorf("open file: %w", err)
 	}
-	defer f.Close() //nolint:errcheck // read-only close
+	defer func() { _ = f.Close() }() // 只读打开，关闭错误无需处理
 
 	scanner := bufio.NewScanner(f)
 	corruptedLines := 0

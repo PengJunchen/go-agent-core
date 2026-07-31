@@ -24,6 +24,7 @@ import (
 // - Tags: 自定义标签（如 "tool:edit", "provider:openai"）
 // - Since/Until: 时间范围
 // - Limit: 限制数量
+// - TrackType: 限定轨道（"" | "sessions" | "runs" | "events"）
 // - Output: 输出目标
 type LogSelector struct {
 	DataDir string // 日志根目录，空则用 "."
@@ -33,6 +34,7 @@ type LogSelector struct {
 	Since *time.Time // 起始时间
 	Until *time.Time // 截止时间
 	Limit int // 0 = 不限
+	TrackType string // "" | "sessions" | "runs" | "events"
 	Output io.Writer // 取走到哪里
 }
 
@@ -44,14 +46,30 @@ func Select(ctx context.Context, sel LogSelector) (*SelectSummary, error) {
 	}
 	extractor := NewJSONLLogExtractor(dataDir)
 	filter := sel.toLogFilter()
-	entries, err := extractor.Extract(ctx, filter)
+
+	// 三轨感知提取
+	envelopes, err := extractor.ExtractEnvelopes(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
+
+	// 从信封导出向后兼容的 ExecLogEntry 列表
+	// （复刻旧 Extract 的行为：每行解析为 ExecLogEntry，专用字段丢失但通用字段保留）
+	var entries []*ExecLogEntry
+	for _, env := range envelopes {
+		entry, eErr := env.ParseAsExecLogEntry()
+		if eErr != nil {
+			continue // 跳过无法解析的行
+		}
+		entries = append(entries, entry)
+	}
+
 	summary := &SelectSummary{
-		TotalScanned: len(entries),
+		TotalScanned: len(envelopes),
+		Envelopes: envelopes,
 		Entries: entries,
 	}
+
 	if sel.Output != nil {
 		for _, e := range entries {
 			data, _ := json.Marshal(e)
@@ -77,7 +95,8 @@ func SelectToFile(ctx context.Context, sel LogSelector, outputPath string) error
 // SelectSummary 是取走操作的摘要。
 type SelectSummary struct {
 	TotalScanned int `json:"total_scanned"`
-	Entries []*ExecLogEntry `json:"entries"`
+	Entries []*ExecLogEntry `json:"entries"` // 向后兼容轨（通用字段保留，专用字段丢失）
+	Envelopes []*LogEnvelope `json:"envelopes"` // 三轨信封（专用字段可解析）
 }
 
 // ─── 辅助方法 ────────────────────────────────────────────────────
@@ -89,12 +108,15 @@ func (sel LogSelector) toLogFilter() *LogFilter {
 		EndTime: sel.Until,
 		Limit: sel.Limit,
 		Tags: sel.Tags,
+		TrackType: sel.TrackType,
 	}
 	// Types → Categories 映射
+	// turn/item/event/session 同时映射到专用类别（Turn/Item/Event）和
+	// 通用 ExecLogEntry 类别，确保专用记录信封和通用条目都能匹配。
 	catMap := map[string][]LogCategory{
-		"turn": {LogCategoryAgent},
-		"item": {LogCategoryTool, LogCategoryLLM, LogCategoryCompact, LogCategoryHITL},
-		"event": {LogCategorySystem},
+		"turn": {LogCategoryTurn, LogCategoryAgent},
+		"item": {LogCategoryItem, LogCategoryTool, LogCategoryLLM, LogCategoryCompact, LogCategoryHITL},
+		"event": {LogCategoryEvent, LogCategorySystem},
 		"session": {LogCategorySession},
 	}
 	for _, t := range sel.Types {
@@ -103,6 +125,8 @@ func (sel LogSelector) toLogFilter() *LogFilter {
 		}
 	}
 	// Levels → LogLevel 字段
+	// LogFilter.Level 为单值字段（LogLevel），只取第一个匹配的 level。
+	// 若后续需要多级别过滤，可将 LogFilter.Level 改为 Levels []LogLevel。
 	for _, l := range sel.Levels {
 		switch l {
 		case "debug":
@@ -116,7 +140,7 @@ func (sel LogSelector) toLogFilter() *LogFilter {
 			f.HasError = &t
 			f.Level = LogLevelError
 		}
-		break
+		return f // 只取第一个匹配的 level，单值字段无需继续
 	}
 	return f
 }

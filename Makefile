@@ -1,12 +1,12 @@
-.PHONY: all verify check fmt vet lint build test scan test-log test-leak test-interface tidy clean
+.PHONY: all verify check fmt vet lint errcheck build test scan test-log test-leak test-interface tidy clean
 
 ## go-agent-core Makefile —— 沿用 go-agent 校验范式（AST + Log + Leak + TDD）
 ## make verify = CI 硬门，全部通过才能合并。
 
 all: build
 
-## verify: CI 完整校验门禁（go-agent 范式：fmt+vet+lint+build+test+scan+log+leak+interface）
-verify: check scan test-log test-leak test-interface
+## verify: CI 完整校验门禁（go-agent 范式：fmt+vet+lint+errcheck+build+test+scan+log+leak+interface）
+verify: check errcheck scan test-log test-leak test-interface
 
 ## check: 基础检查链
 check: fmt vet lint build test
@@ -21,6 +21,10 @@ vet:
 
 lint:
 	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run ./... || echo " lint: golangci-lint not installed, skipped"
+
+## errcheck: 未检查错误检测（github.com/kisielk/errcheck）。未安装则 skip。
+errcheck:
+	@command -v errcheck >/dev/null 2>&1 && errcheck ./... || echo " errcheck: not installed, skipped"
 
 build:
 	go build ./...

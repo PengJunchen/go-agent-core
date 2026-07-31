@@ -10,11 +10,17 @@ import (
 )
 
 // LogExtractor 是日志提取器接口。
+//
+// Extract/ExtractToFile 返回通用 ExecLogEntry（向后兼容轨）；
+// ExtractEnvelopes 返回三轨感知的 LogEnvelope，消费者按 Track+Category
+// 解析到具体 Record 类型，保留专用字段。
 type LogExtractor interface {
-	// Extract 提取符合条件的条目到内存。
+	// Extract 提取符合条件的条目到内存（向后兼容，返回通用 ExecLogEntry）。
 	Extract(ctx context.Context, filter *LogFilter) ([]*ExecLogEntry, error)
 	// ExtractToFile 提取符合条件的条目到文件。
 	ExtractToFile(ctx context.Context, filter *LogFilter, outputPath string) error
+	// ExtractEnvelopes 提取三轨信封，Payload 延迟反序列化，专用字段可解析。
+	ExtractEnvelopes(ctx context.Context, filter *LogFilter) ([]*LogEnvelope, error)
 }
 
 // ExtractConfig 是 JSONLLogExtractor 的配置选项。
@@ -47,6 +53,9 @@ type LogFilter struct {
 	Tags []string
 	Level LogLevel
 	Limit int
+	// TrackType 限定轨道："" | "sessions" | "runs" | "events"。
+	// 空串表示扫描所有轨道。Select/Extract 时按轨道过滤文件目录。
+	TrackType string
 }
 
 // Matches 判断一条日志是否匹配过滤条件。

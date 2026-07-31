@@ -86,6 +86,44 @@ func (e *JSONLLogExtractor) Extract(ctx context.Context, filter *LogFilter) ([]*
 	return e.ExtractWithOpts(ctx, filter)
 }
 
+// ExtractEnvelopes 提取三轨信封，Payload 延迟反序列化，专用字段可解析。
+// 按 TrackType 限定扫描轨道，按 Categories/SessionID/时间/HasError 等过滤，
+// 返回 []*LogEnvelope，消费者按 Track+Category 选择 ParseAsXxx 解析 Payload。
+func (e *JSONLLogExtractor) ExtractEnvelopes(ctx context.Context, filter *LogFilter) ([]*LogEnvelope, error) {
+	if filter == nil {
+		filter = &LogFilter{}
+	}
+
+	files, err := e.listJSONLFilesFilteredByTrack(filter.StartTime, filter.EndTime, filter.TrackType)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []*LogEnvelope
+
+	for _, f := range files {
+		if ctx.Err() != nil {
+			return results, ctx.Err()
+		}
+		envelopes, err := e.scanFileEnvelopes(ctx, f, filter)
+		if err != nil {
+			return nil, err
+		}
+		for _, env := range envelopes {
+			results = append(results, env)
+			if filter.Limit > 0 && len(results) >= filter.Limit {
+				results = results[:filter.Limit]
+				break
+			}
+		}
+		if filter.Limit > 0 && len(results) >= filter.Limit {
+			break
+		}
+	}
+
+	return results, nil
+}
+
 // ExtractWithOpts 提取符合条件的条目到内存，支持函数式选项。
 //
 // 支持的选项：WithSortByTime(), WithDedup(), WithMaxStreamSize().
@@ -193,14 +231,32 @@ func (e *JSONLLogExtractor) ExtractToFile(ctx context.Context, filter *LogFilter
 // listJSONLFilesFiltered 列出日志目录下所有 .jsonl 文件，按时间范围过滤文件名。
 // 从文件名提取日期（格式 YYYY-MM-DD）进行过滤。若 start/end 均为 nil，返回全部文件。
 func (e *JSONLLogExtractor) listJSONLFilesFiltered(start, end *time.Time) ([]string, error) {
-	// 扫描 dataDir 及其子目录（sessions/runs/events）中的 .jsonl 文件
+	return e.listJSONLFilesFilteredByTrack(start, end, "")
+}
+
+// listJSONLFilesFilteredByTrack 按 TrackType 限定扫描轨道，并按时间范围过滤文件名。
+// trackType 为空时扫描所有轨道（根目录 + sessions/runs/events）。
+func (e *JSONLLogExtractor) listJSONLFilesFilteredByTrack(start, end *time.Time, trackType string) ([]string, error) {
+	var patterns []string
+	switch trackType {
+	case TrackSessions:
+		patterns = []string{filepath.Join(e.dataDir, "sessions", "*.jsonl")}
+	case TrackRuns:
+		patterns = []string{filepath.Join(e.dataDir, "runs", "*.jsonl")}
+	case TrackEvents:
+		patterns = []string{filepath.Join(e.dataDir, "events", "*.jsonl")}
+	default:
+		patterns = []string{
+			filepath.Join(e.dataDir, "*.jsonl"),
+			filepath.Join(e.dataDir, "sessions", "*.jsonl"),
+			filepath.Join(e.dataDir, "runs", "*.jsonl"),
+			filepath.Join(e.dataDir, "events", "*.jsonl"),
+		}
+	}
+
+	// 扫描日志目录下所有 .jsonl 文件
 	var matches []string
-	for _, pattern := range []string{
-		filepath.Join(e.dataDir, "*.jsonl"),
-		filepath.Join(e.dataDir, "sessions", "*.jsonl"),
-		filepath.Join(e.dataDir, "runs", "*.jsonl"),
-		filepath.Join(e.dataDir, "events", "*.jsonl"),
-	} {
+	for _, pattern := range patterns {
 		m, err := filepath.Glob(pattern)
 		if err != nil {
 			return nil, err
@@ -341,4 +397,197 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ─── 三轨信封分类与过滤 ──────────────────────────────────────────
+
+// envelopeProbe 用于探测 JSON 行的记录类型（形态学检测）。
+// 字段为指针可区分"缺失"与"空值"。ExecLogEntry 专用字段（action/level/tags）
+// 也包含在此，用于信封过滤时决定是否应用 ExecLogEntry 专属过滤维度。
+type envelopeProbe struct {
+	Category string `json:"category"`
+	SessionID string `json:"session_id"`
+	Timestamp string `json:"ts"`
+	Level string `json:"level"`
+	Action string `json:"action"`
+	Error string `json:"error"`
+	Tags []string `json:"tags"`
+	ItemType *string `json:"item_type"` // ItemRecord 专用
+	EntryType *string `json:"entry_type"` // SessionRecord 专用
+	EventType *string `json:"event_type"` // TurnRecord / EventRecord 共用
+	Status *string `json:"status"` // TurnRecord 专用
+}
+
+// trackFromPath 从文件路径推导轨道名。
+// sessions/*.jsonl → "sessions", runs/*.jsonl → "runs",
+// events/*.jsonl → "events", 根目录 → "".
+func trackFromPath(path string) string {
+	dir := filepath.Dir(path)
+	base := filepath.Base(dir)
+	switch base {
+	case TrackSessions, TrackRuns, TrackEvents:
+		return base
+	}
+	return ""
+}
+
+// classifyEnvelope 根据轨道名 + 探测字段确定信封类别。
+//
+// 优先级：category 字段存在 → 通用 ExecLogEntry；否则按轨道+形态推导：
+// - sessions 轨 → SessionRecord
+// - runs 轨 + item_type 存在 → ItemRecord
+// - runs 轨 + status/event_type 存在 → TurnRecord
+// - events 轨 → EventRecord
+func classifyEnvelope(track string, probe envelopeProbe) LogCategory {
+	if probe.Category != "" {
+		return LogCategory(probe.Category)
+	}
+	switch track {
+	case TrackSessions:
+		return LogCategorySession
+	case TrackRuns:
+		if probe.ItemType != nil {
+			return LogCategoryItem
+		}
+		if probe.Status != nil || probe.EventType != nil {
+			return LogCategoryTurn
+		}
+		return LogCategoryAgent
+	case TrackEvents:
+		return LogCategoryEvent
+	}
+	return LogCategory(probe.Category)
+}
+
+// envelopeMatches 判断信封是否匹配过滤条件。
+//
+// 通用维度（Categories/SessionID/时间/HasError）适用于所有记录类型。
+// ExecLogEntry 专属维度（Actions/Level/Tags）仅在探测到 category 字段存在
+// 时应用（即通用 ExecLogEntry 条目），专用记录（Turn/Item/Event/Session）
+// 无这些字段故跳过。
+func envelopeMatches(probe envelopeProbe, category LogCategory, filter *LogFilter) bool {
+	if len(filter.Categories) > 0 {
+		hit := false
+		for _, c := range filter.Categories {
+			if category == c {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			return false
+		}
+	}
+	if filter.SessionID != "" && probe.SessionID != filter.SessionID {
+		return false
+	}
+	// Actions 过滤：仅对通用 ExecLogEntry 条目生效
+	if len(filter.Actions) > 0 {
+		if probe.Category != "" { // 有 category 字段 → ExecLogEntry
+			hit := false
+			for _, a := range filter.Actions {
+				if probe.Action == a {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				return false
+			}
+		}
+		// 专用记录无 action 字段，不做过滤
+	}
+	if filter.HasError != nil {
+		hasErr := probe.Error != ""
+		if *filter.HasError != hasErr {
+			return false
+		}
+	}
+	// Level 过滤：仅对通用 ExecLogEntry 条目生效
+	if filter.Level != "" {
+		if probe.Category != "" && LogLevel(probe.Level) != filter.Level {
+			return false
+		}
+	}
+	// Tags 过滤：仅对通用 ExecLogEntry 条目生效
+	if len(filter.Tags) > 0 {
+		if probe.Category != "" {
+			hit := false
+			for _, want := range filter.Tags {
+				for _, got := range probe.Tags {
+					if got == want {
+						hit = true
+						break
+					}
+				}
+				if hit {
+					break
+				}
+			}
+			if !hit {
+				return false
+			}
+		}
+	}
+	// 时间过滤
+	if filter.StartTime != nil || filter.EndTime != nil {
+		ts, err := time.Parse(time.RFC3339Nano, probe.Timestamp)
+		if err == nil {
+			if filter.StartTime != nil && ts.Before(*filter.StartTime) {
+				return false
+			}
+			if filter.EndTime != nil && ts.After(*filter.EndTime) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// scanFileEnvelopes 扫描单个文件，返回匹配过滤条件的信封。
+func (e *JSONLLogExtractor) scanFileEnvelopes(ctx context.Context, path string, filter *LogFilter) ([]*LogEnvelope, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	track := trackFromPath(path)
+	remaining := filter.Limit
+
+	var results []*LogEnvelope
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, e.cfg.MaxScanBufferSize), e.cfg.MaxLineSize)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return results, ctx.Err()
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		// 探测行类型
+		var probe envelopeProbe
+		if err := json.Unmarshal([]byte(line), &probe); err != nil {
+			continue // 跳过损坏行
+		}
+		category := classifyEnvelope(track, probe)
+
+		if envelopeMatches(probe, category, filter) {
+			env := &LogEnvelope{
+				Track: track,
+				Category: category,
+				Payload: json.RawMessage(line),
+			}
+			results = append(results, env)
+			if remaining > 0 {
+				remaining--
+				if remaining == 0 {
+					break
+				}
+			}
+		}
+	}
+	return results, scanner.Err()
 }

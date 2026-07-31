@@ -20,6 +20,7 @@ package log
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -155,6 +156,100 @@ type TokenUsageLog struct {
 	Output int `json:"output"`
 	CacheRead int `json:"cache_read,omitempty"`
 	CacheWrite int `json:"cache_write,omitempty"`
+}
+
+// ─── 三轨轨道常量（导出） ────────────────────────────────────────
+//
+// 三轨文件布局对应三个轨道名，LogEnvelope.Track 与 LogFilter.TrackType
+// 取这些值。空串 "" 表示不限定轨道（扫描所有轨道）。
+const (
+	TrackSessions = "sessions"
+	TrackRuns = "runs"
+	TrackEvents = "events"
+)
+
+// ─── 专用记录类别（LogEnvelope 分类用，向后兼容新增） ────────────
+//
+// LogCategory 原有类别描述通用 ExecLogEntry；这里新增 Turn/Item/Event
+// 三个类别，用于在 LogEnvelope 中标记专用记录类型，消费者据此选择
+// ParseAsXxx 方法反序列化 Payload。
+const (
+	LogCategoryTurn LogCategory = "turn"
+	LogCategoryItem LogCategory = "item"
+	LogCategoryEvent LogCategory = "event"
+)
+
+// LogEnvelope 是三轨提取的统一信封。
+//
+// LogExtractor.ExtractEnvelopes 返回 []*LogEnvelope，Payload 为延迟反序列化
+// 的原始 JSON。消费者按 Track + Category 选择 ParseAsXxx 方法解析到具体
+// Record 类型，从而保留专用字段（如 TurnRecord.Input/ItemRecord.ToolName/
+// EventRecord.EventType/SessionRecord.EntryType）。
+//
+// Category 取值：
+// - Turn/Item/Event/Session — 专用记录（对应 ParseAsTurnRecord 等）
+// - llm/tool/session/compact/agent/hitl/system — 通用 ExecLogEntry
+// （对应 ParseAsExecLogEntry）
+type LogEnvelope struct {
+	Track string `json:"track"` // "sessions" | "runs" | "events"
+	Category LogCategory `json:"category"` // Turn/Item/Event/Session/Tool/LLM/Compact/HITL/...
+	Payload json.RawMessage `json:"payload"` // 延迟反序列化
+}
+
+// ParseAsExecLogEntry 将 Payload 反序列化为通用 ExecLogEntry（向后兼容轨）。
+func (e *LogEnvelope) ParseAsExecLogEntry() (*ExecLogEntry, error) {
+	var entry ExecLogEntry
+	if err := json.Unmarshal(e.Payload, &entry); err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+// ParseAsTurnRecord 将 Payload 反序列化为 TurnRecord（runs 轨 turn 级记录）。
+func (e *LogEnvelope) ParseAsTurnRecord() (*TurnRecord, error) {
+	var rec TurnRecord
+	if err := json.Unmarshal(e.Payload, &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// ParseAsItemRecord 将 Payload 反序列化为 ItemRecord（runs 轨 item 级记录）。
+func (e *LogEnvelope) ParseAsItemRecord() (*ItemRecord, error) {
+	var rec ItemRecord
+	if err := json.Unmarshal(e.Payload, &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// ParseAsEventRecord 将 Payload 反序列化为 EventRecord（events 轨记录）。
+func (e *LogEnvelope) ParseAsEventRecord() (*EventRecord, error) {
+	var rec EventRecord
+	if err := json.Unmarshal(e.Payload, &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// ParseAsSessionRecord 将 Payload 反序列化为 SessionRecord（sessions 轨记录）。
+func (e *LogEnvelope) ParseAsSessionRecord() (*SessionRecord, error) {
+	var rec SessionRecord
+	if err := json.Unmarshal(e.Payload, &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// IsEntryCategory 判断类别是否为通用 ExecLogEntry 类别（拥有 action/level/tags
+// 字段），用于信封过滤时决定是否应用 ExecLogEntry 专属过滤维度。
+func IsEntryCategory(c LogCategory) bool {
+	switch c {
+	case LogCategoryLLM, LogCategoryTool, LogCategorySession,
+		LogCategoryCompact, LogCategoryAgent, LogCategoryHITL, LogCategorySystem:
+		return true
+	}
+	return false
 }
 
 // ─── 构造辅助 ────────────────────────────────────────────────────

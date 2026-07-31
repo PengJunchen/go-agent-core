@@ -36,7 +36,7 @@ func TestVC002_ExtractToFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open output: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // 测试清理：读取后关闭，错误无需处理
 
 	var count int
 	scanner := bufio.NewScanner(f)

@@ -65,7 +65,7 @@ func TestVQ_LoggerWriteBuffer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONLExecLogger: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }() // 测试清理：关闭错误不影响断言
 
 	// 写入少量数据（小于缓冲区），不手动 Flush
 	for i := 0; i < 3; i++ {
@@ -77,7 +77,7 @@ func TestVQ_LoggerWriteBuffer(t *testing.T) {
 	matches := globLogs(dir, "batch_*.jsonl")
 	// 因为 ensureWriter 在首次 Log 时就创建了文件，且 bufio 可能有部分写入
 	// 我们验证的是关闭后所有数据落盘
-	logger.Close()
+	_ = logger.Close() // 显式关闭以刷新缓冲，错误随后由文件读取验证
 
 	// Close 后文件应存在且有内容
 	matches = globLogs(dir, "batch_*.jsonl")
@@ -105,7 +105,7 @@ func TestVQ_LoggerConfigBufferSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONLExecLogger: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }() // 测试清理：关闭错误不影响断言
 
 	// 写入多条数据，小缓冲区应自动 Flush
 	for i := 0; i < 10; i++ {
@@ -191,7 +191,7 @@ func TestVS_CrashBypass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONLExecLogger: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }() // 测试清理：关闭错误不影响断言
 
 	// 正常写入
 	entry := NewEntry(LogCategorySystem, "normal", "", "")
@@ -268,7 +268,7 @@ func TestVS_CrashLogWriteFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New logger after crash should not fail: %v", err)
 	}
-	defer logger2.Close()
+	defer func() { _ = logger2.Close() }() // 测试清理：关闭错误不影响断言
 	if err := logger2.Log(context.Background(), entry); err != nil {
 		t.Fatalf("Log on fresh logger should succeed: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestVT_RotationByDate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONLExecLogger: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }() // 测试清理：关闭错误不影响断言
 
 	// 写入一条日志（今日）
 	entry := NewEntry(LogCategorySystem, "start", "", "")
@@ -322,7 +322,7 @@ func TestVT_RotationBySize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONLExecLogger: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }() // 测试清理：关闭错误不影响断言
 
 	// 写入足够数据触发轮转（每个 payload 较大）
 	for i := 0; i < 30; i++ {
@@ -358,7 +358,7 @@ func TestVT_RotationSizeAndDate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONLExecLogger: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }() // 测试清理：关闭错误不影响断言
 
 	// 写入大量数据触发大小轮转
 	for i := 0; i < 40; i++ {
@@ -402,7 +402,7 @@ func scanLogFile(path string, filter *LogFilter) ([]*ExecLogEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // 测试辅助：读取后关闭，错误无需处理
 
 	ext := &JSONLLogExtractor{dataDir: filepath.Dir(path), cfg: DefaultExtractConfig()}
 	return ext.scanFile(path, filter, 0)
@@ -420,7 +420,7 @@ func TestVT_FlushModeLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONLExecLogger: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }() // 测试清理：关闭错误不影响断言
 
 	// 写入一条日志
 	entry := NewEntry(LogCategorySystem, "line_test", "s-1", "t-1")
@@ -454,7 +454,7 @@ func TestVT_FlushModeInterval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONLExecLogger: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }() // 测试清理：关闭错误不影响断言
 
 	// 写入条目
 	_ = logger.Log(context.Background(), NewEntry(LogCategorySystem, "interval_test", "s-1", "t-1"))

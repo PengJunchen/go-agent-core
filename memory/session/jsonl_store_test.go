@@ -228,9 +228,9 @@ func TestJSONLSessionStore_ListByContextID(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := newTestCtx()
 
-	store.CreateSession(ctx, &SessionOptions{ContextID: "group-a"})
-	store.CreateSession(ctx, &SessionOptions{ContextID: "group-b"})
-	store.CreateSession(ctx, &SessionOptions{ContextID: "group-a"})
+	_, _ = store.CreateSession(ctx, &SessionOptions{ContextID: "group-a"}) // 测试夹具：构造分组数据，失败由后续 ListSessions 断言暴露
+	_, _ = store.CreateSession(ctx, &SessionOptions{ContextID: "group-b"}) // 测试夹具：构造分组数据，失败由后续 ListSessions 断言暴露
+	_, _ = store.CreateSession(ctx, &SessionOptions{ContextID: "group-a"}) // 测试夹具：构造分组数据，失败由后续 ListSessions 断言暴露
 
 	sessions, err := store.ListSessions(ctx, &ListOptions{ContextID: "group-a"})
 	if err != nil {
@@ -256,11 +256,11 @@ func TestJSONLSessionStore_ListByStatus(t *testing.T) {
 
 	// 创建活跃会话
 	active1, _ := store.CreateSession(ctx, &SessionOptions{ContextID: "active-1"})
-	store.CreateSession(ctx, &SessionOptions{ContextID: "active-2"})
+	_, _ = store.CreateSession(ctx, &SessionOptions{ContextID: "active-2"}) // 测试夹具：构造活跃会话，失败由后续 ListSessions 断言暴露
 
 	// 完成一个
 	completed := SessionCompleted
-	store.UpdateSession(ctx, active1.ID, &SessionUpdate{Status: &completed})
+	_ = store.UpdateSession(ctx, active1.ID, &SessionUpdate{Status: &completed}) // 测试夹具：更新会话状态，失败由后续 ListSessions 断言暴露
 
 	sessions, err := store.ListSessions(ctx, &ListOptions{Status: SessionActive})
 	if err != nil {
@@ -285,7 +285,7 @@ func TestJSONLSessionStore_ListWithLimit(t *testing.T) {
 	ctx := newTestCtx()
 
 	for i := 0; i < 5; i++ {
-		store.CreateSession(ctx, nil)
+		_, _ = store.CreateSession(ctx, nil) // 测试夹具：批量创建会话，失败由后续 Limit 断言暴露
 	}
 
 	sessions, err := store.ListSessions(ctx, &ListOptions{Limit: 3})
@@ -498,7 +498,7 @@ func TestJSONLSessionStore_CorruptedLines(t *testing.T) {
 	if _, err := f.WriteString("not-json\n"); err != nil {
 		t.Fatalf("WriteString: %v", err)
 	}
-	f.Close()
+	_ = f.Close() // 测试夹具：写入破坏数据后关闭，错误无需处理
 
 	// 恢复应跳过破坏行
 	store2, err := NewJSONLSessionStore(path)
