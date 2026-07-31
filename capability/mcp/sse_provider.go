@@ -182,7 +182,7 @@ func (c *sseConn) connect(ctx context.Context) error {
 		event string
 		data string
 	}
-	evCh := make(chan ev, 8)
+	evCh := make(chan ev, 64)
 	parseErr := make(chan error, 1)
 	go func() {
 		parseErr <- parseSSE(resp.Body, func(event, data string) {

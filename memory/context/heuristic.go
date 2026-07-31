@@ -364,12 +364,18 @@ func logCompact(ctx context.Context, strategy string, result *CompactResult) {
 	)
 }
 
+// initialCtxMarker is a sentinel value stored in TurnItem.Metadata to mark
+// items that were injected via SetInitialContext, enabling idempotent dedup.
+const initialCtxMarker = "__initial_ctx__"
+
 // SetInitialContext 设置初始上下文（如系统提示）。
 //
 // 这些条目被放置在 items 列表的最前面。如果 items 当前为空则直接设置；
 // 否则在现有 items 前面插入。通常用于注入 system prompt。
 //
 // 幂等：多次调用会在 items 前面追加（不覆盖）。如果需覆盖，可先清空再调用。
+// 连续调用时，已有的 initial context 不会被重复插入——新传入的 items
+// 中与已有 initial context 内容相同的条目会被跳过。
 func (m *HeuristicContextManager) SetInitialContext(ctx context.Context, items []TurnItem) error {
 	select {
 	case <-ctx.Done():
@@ -384,8 +390,61 @@ func (m *HeuristicContextManager) SetInitialContext(ctx context.Context, items [
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 在当前 items 前面插入新的初始上下文
-	m.items = append(items, m.items...)
+	// Count existing initial context items (marked with initialCtxMarker)
+	existingInitialCount := 0
+	for _, item := range m.items {
+		if item.Metadata != nil {
+			if _, ok := item.Metadata[initialCtxMarker]; ok {
+				existingInitialCount++
+			}
+		}
+	}
+
+	// If there are existing initial items, prepend only new (non-duplicate) items
+	if existingInitialCount > 0 {
+		// Build a set of existing initial item content for dedup
+		existingSet := make(map[string]struct{})
+		for i := 0; i < existingInitialCount && i < len(m.items); i++ {
+			key := m.items[i].Role + ":" + m.items[i].Content
+			existingSet[key] = struct{}{}
+		}
+
+		// Filter out duplicates from new items
+		var newItems []TurnItem
+		for _, item := range items {
+			key := item.Role + ":" + item.Content
+			if _, exists := existingSet[key]; !exists {
+				newItems = append(newItems, item)
+			}
+		}
+
+		if len(newItems) == 0 {
+			return nil
+		}
+
+		// Mark new items as initial context
+		for i := range newItems {
+			if newItems[i].Metadata == nil {
+				newItems[i].Metadata = make(map[string]any)
+			}
+			newItems[i].Metadata[initialCtxMarker] = true
+		}
+
+		// Prepend new items before existing initial context (preserve prepend semantics)
+		merged := make([]TurnItem, 0, len(newItems)+len(m.items))
+		merged = append(merged, newItems...)
+		merged = append(merged, m.items...)
+		m.items = merged
+	} else {
+		// No existing initial context: mark and prepend all items
+		for i := range items {
+			if items[i].Metadata == nil {
+				items[i].Metadata = make(map[string]any)
+			}
+			items[i].Metadata[initialCtxMarker] = true
+		}
+		m.items = append(items, m.items...)
+	}
 
 	slog.Info("initial context set",
 		"op", "context_set_initial",

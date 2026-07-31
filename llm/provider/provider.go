@@ -31,6 +31,28 @@ type ModelInfo struct {
 	SupportsThinking bool
 	SupportsVision bool
 	SupportsStreaming bool
+	Capabilities []string // extensible capability list (e.g., "vision", "thinking", "streaming", "tool_use")
+}
+
+// HasCapability checks whether the model supports the given capability.
+// It first checks the Capabilities list, then falls back to boolean fields
+// for backward compatibility.
+func (m *ModelInfo) HasCapability(cap string) bool {
+	for _, c := range m.Capabilities {
+		if c == cap {
+			return true
+		}
+	}
+	// Fall back to boolean fields for backward compatibility
+	switch cap {
+	case "vision":
+		return m.SupportsVision
+	case "thinking":
+		return m.SupportsThinking
+	case "streaming":
+		return m.SupportsStreaming
+	}
+	return false
 }
 
 // ChatOptions 是一次聊天的可选参数。

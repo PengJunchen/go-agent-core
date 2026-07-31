@@ -15,12 +15,19 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
 
 // defaultFileIOTimeout 是文件 IO 操作的默认超时时间。
 const defaultFileIOTimeout = 5 * time.Second
+
+// persistMaxRetries 是持久化写入的最大重试次数。
+const persistMaxRetries = 3
+
+// persistBaseDelay 是持久化重试的基础延迟。
+const persistBaseDelay = 100 * time.Millisecond
 
 // jsonlEntry 是写入磁盘的顶层 JSONL 记录结构。
 type jsonlEntry struct {
@@ -268,13 +275,9 @@ func (s *JSONLSessionStore) ListSessions(_ context.Context, opts *ListOptions) (
 
 // sortSessionsByUpdatedAtDesc 按 UpdatedAt 降序排序。
 func sortSessionsByUpdatedAtDesc(sessions []*Session) {
-	for i := 0; i < len(sessions); i++ {
-		for j := i + 1; j < len(sessions); j++ {
-			if sessions[j].UpdatedAt.After(sessions[i].UpdatedAt) {
-				sessions[i], sessions[j] = sessions[j], sessions[i]
-			}
-		}
-	}
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	})
 }
 
 // validTransition 校验状态转换是否合法。
