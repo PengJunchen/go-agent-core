@@ -136,6 +136,7 @@ func newStdioConn(rw io.ReadWriter, closer io.Closer) *stdioConn {
 	dec := json.NewDecoder(rw)
 	// 独占读泵 goroutine：独占 dec，无数据竞争。
 	go func() {
+		defer close(c.msgs) // 退出前关闭 channel，避免调用方永久阻塞
 		for {
 			var resp rpcResponse
 			if err := dec.Decode(&resp); err != nil {

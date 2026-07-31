@@ -212,3 +212,21 @@ func TestHTTPMCPProvider_CustomHeaders(t *testing.T) {
 		t.Errorf("Authorization header = %q, want 'Bearer test-token'", gotAuth)
 	}
 }
+
+// HTTP-008: baseTransport 被缓存，多次调用复用同一 baseTransport。
+func TestHTTPMCPProvider_BaseTransportCached(t *testing.T) {
+	srv := httptest.NewServer(mockHTTPHandler(t, testTools(), false))
+	defer srv.Close()
+
+	p := &HTTPMCPProvider{URL: srv.URL, httpClient: srv.Client()}
+	defer func() { _ = p.Close() }()
+
+	// 多次 ListTools/Call 应复用缓存的 baseTransport，不会重复 initialize。
+	for i := 0; i < 3; i++ {
+		tools, err := p.ListTools(context.Background())
+		if err != nil {
+			t.Fatalf("ListTools #%d: %v", i, err)
+		}
+		assertTransportTools(t, tools, []string{"search", "fetch"})
+	}
+}

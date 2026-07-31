@@ -181,3 +181,34 @@ var errDialFailed = &dialError{}
 type dialError struct{}
 
 func (e *dialError) Error() string { return "dial failed" }
+
+// Stdio-007: server 关闭连接后，调用返回 io.ErrClosedPipe（而非永久阻塞）。
+// 验证读泵 goroutine 退出前 close(c.msgs)，避免调用方永远阻塞在 channel 读取上。
+func TestStdioMCPProvider_ServerCloseNotHang(t *testing.T) {
+	clientPipe, serverPipe := newPipePair()
+	// 启动 mock server，稍后关闭。
+	go mockStdioServer(t, serverPipe, testTools())
+
+	p := &StdioMCPProvider{
+		dial: func(_ context.Context) (rpcConn, error) {
+			return newStdioConn(clientPipe, clientPipe), nil
+		},
+	}
+
+	// 首次 ListTools 成功。
+	_, err := p.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("first ListTools: %v", err)
+	}
+
+	// 关闭 server 端 pipe，触发客户端读泵退出。
+	_ = serverPipe.Close()
+
+	// 后续 Call 应返回错误（而非永久阻塞）。
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = p.Call(ctx, "search", json.RawMessage(`{}`))
+	if err == nil {
+		t.Error("expected error after server close, got nil")
+	}
+}

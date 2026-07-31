@@ -32,35 +32,47 @@ type HTTPMCPProvider struct {
 
 	mu sync.Mutex
 	conn *httpConn // 复用同一 client / 配置
+	base *baseTransport // 缓存 baseTransport，
 }
 
-func (p *HTTPMCPProvider) ensureConn() *httpConn {
+// ensureBase 惰性建立 baseTransport（首次调用时初始化）。
+func (p *HTTPMCPProvider) ensureBase() *baseTransport {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.conn == nil {
-		client := p.httpClient
-		if client == nil {
-			client = http.DefaultClient
-		}
-		p.conn = newHTTPConn(p.URL, p.Headers, client)
+	if p.base != nil {
+		return p.base
 	}
-	return p.conn
+	client := p.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	p.conn = newHTTPConn(p.URL, p.Headers, client)
+	p.base = newBaseTransport(p.Timeout, p.conn)
+	return p.base
 }
 
 // ListTools 列出 MCP server 暴露的工具。
 func (p *HTTPMCPProvider) ListTools(ctx context.Context) ([]Tool, error) {
-	bt := newBaseTransport(p.Timeout, p.ensureConn())
-	return bt.ListTools(ctx)
+	return p.ensureBase().ListTools(ctx)
 }
 
 // Call 调用 MCP server 上的远程工具。
 func (p *HTTPMCPProvider) Call(ctx context.Context, toolName string, args json.RawMessage) (json.RawMessage, error) {
-	bt := newBaseTransport(p.Timeout, p.ensureConn())
-	return bt.Call(ctx, toolName, args)
+	return p.ensureBase().Call(ctx, toolName, args)
 }
 
-// Close 清理连接。HTTP 为无状态连接，Close 不需要终止长连接。
-func (p *HTTPMCPProvider) Close() error { return nil }
+// Close 清理连接。HTTP 为无状态连接，Close 重置缓存的 baseTransport。
+func (p *HTTPMCPProvider) Close() error {
+	p.mu.Lock()
+	bt := p.base
+	p.base = nil
+	p.conn = nil
+	p.mu.Unlock()
+	if bt == nil {
+		return nil
+	}
+	return bt.Close()
+}
 
 // ─── httpConn — JSON-RPC over HTTP POST ──────────────────────────
 

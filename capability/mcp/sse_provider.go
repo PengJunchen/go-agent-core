@@ -31,8 +31,14 @@ type SSEMCPProvider struct {
 
 	mu sync.Mutex
 	conn *sseConn
+	base *baseTransport // 缓存 baseTransport，
 	connErr error
+	connErrAt time.Time // 连接错误发生时间，用于过期重试
 }
+
+// connErrTTL 是连接错误的缓存过期时间。过期后 ensureConn 会重试拨号，
+// 避免永久缓存瞬时错误（如网络抖动）导致后续调用永远失败。
+const connErrTTL = 5 * time.Second
 
 func (p *SSEMCPProvider) client() *http.Client {
 	if p.httpClient != nil {
@@ -41,26 +47,36 @@ func (p *SSEMCPProvider) client() *http.Client {
 	return http.DefaultClient
 }
 
-// ensureConn 惰性建立 SSE 流（含 endpoint 协商）。失败会被缓存以避免重复拨号。
-func (p *SSEMCPProvider) ensureConn(ctx context.Context) (*sseConn, error) {
+// ensureConn 惰性建立 SSE 流（含 endpoint 协商）。
+//
+// 失败会被缓存 connErrTTL 以避免重复拨号，但过期后会重试，避免永久缓存
+// 瞬时错误。成功后缓存连接与 baseTransport 供后续调用复用。
+func (p *SSEMCPProvider) ensureConn(ctx context.Context) (*baseTransport, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.conn != nil {
-		return p.conn, nil
+	// 已有缓存的 baseTransport，直接复用。
+	if p.base != nil {
+		return p.base, nil
 	}
-	if p.connErr != nil {
+	// 连接错误未过期，返回缓存的错误。
+	if p.connErr != nil && time.Since(p.connErrAt) < connErrTTL {
 		return nil, p.connErr
 	}
+	// 清空过期错误以便重试。
+	p.connErr = nil
+	p.connErrAt = time.Time{}
 	conn, err := newSSEConn(ctx, p.URL, p.Headers, p.client())
 	if err != nil {
 		p.connErr = err
+		p.connErrAt = time.Now()
 		return nil, err
 	}
 	p.conn = conn
-	return p.conn, nil
+	p.base = newBaseTransport(p.Timeout, conn)
+	return p.base, nil
 }
 
-// resetConn 在连接失效后清空以便重试。
+// resetConn 在连接失效后清空缓存的 base/conn 以便重试。
 func (p *SSEMCPProvider) resetConn(err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -68,16 +84,17 @@ func (p *SSEMCPProvider) resetConn(err error) {
 		_ = p.conn.close()
 	}
 	p.conn = nil
+	p.base = nil
 	p.connErr = err
+	p.connErrAt = time.Now()
 }
 
 // ListTools 列出 MCP server 暴露的工具。
 func (p *SSEMCPProvider) ListTools(ctx context.Context) ([]Tool, error) {
-	conn, err := p.ensureConn(ctx)
+	bt, err := p.ensureConn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	bt := newBaseTransport(p.Timeout, conn)
 	tools, err := bt.ListTools(ctx)
 	if err != nil {
 		p.resetConn(err)
@@ -87,11 +104,10 @@ func (p *SSEMCPProvider) ListTools(ctx context.Context) ([]Tool, error) {
 
 // Call 调用 MCP server 上的远程工具。
 func (p *SSEMCPProvider) Call(ctx context.Context, toolName string, args json.RawMessage) (json.RawMessage, error) {
-	conn, err := p.ensureConn(ctx)
+	bt, err := p.ensureConn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	bt := newBaseTransport(p.Timeout, conn)
 	res, err := bt.Call(ctx, toolName, args)
 	if err != nil {
 		p.resetConn(err)
@@ -99,12 +115,14 @@ func (p *SSEMCPProvider) Call(ctx context.Context, toolName string, args json.Ra
 	return res, err
 }
 
-// Close 关闭 SSE 流。
+// Close 关闭 SSE 流并重置缓存。
 func (p *SSEMCPProvider) Close() error {
 	p.mu.Lock()
 	conn := p.conn
 	p.conn = nil
+	p.base = nil
 	p.connErr = nil
+	p.connErrAt = time.Time{}
 	p.mu.Unlock()
 	if conn == nil {
 		return nil

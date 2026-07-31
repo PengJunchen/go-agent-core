@@ -56,6 +56,9 @@ func (s *sseTestServer) serveSSE(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		s.t.Fatal("ResponseWriter does not support flushing")
 	}
+
+	// 序列化所有 ResponseWriter 写操作（与 serveMessage 共享同一把锁），
+	// 避免 serveSSE 的 Flush 与 serveMessage 的 Write/Flush 数据竞争。
 	s.mu.Lock()
 	s.w = w
 	s.flusher = f
@@ -65,11 +68,11 @@ func (s *sseTestServer) serveSSE(w http.ResponseWriter, r *http.Request) {
 	default:
 		close(s.ready)
 	}
-	s.mu.Unlock()
 
 	// 发送 endpoint 事件。
 	_, _ = io.WriteString(w, "event: endpoint\ndata: /message\n\n")
 	f.Flush()
+	s.mu.Unlock()
 
 	// 保持连接直到客户端断开。
 	<-r.Context().Done()
@@ -233,4 +236,33 @@ func TestSSEMCPProvider_CloseAndReconnect(t *testing.T) {
 		t.Fatalf("second ListTools: %v", err)
 	}
 	_ = p.Close()
+}
+
+// SSE-006: 连接错误不会永久缓存，过期后可重试。
+func TestSSEMCPProvider_ConnErrExpiry(t *testing.T) {
+	p := &SSEMCPProvider{
+		URL: "http://127.0.0.1:1/sse",
+		httpClient: &http.Client{Timeout: 100 * time.Millisecond},
+	}
+
+	// 首次连接失败，错误被缓存。
+	_, err1 := p.ListTools(context.Background())
+	if err1 == nil {
+		t.Fatal("expected first connection error")
+	}
+
+	// 未过期前，再次调用返回缓存错误（不重新拨号）。
+	_, err2 := p.ListTools(context.Background())
+	if err2 == nil {
+		t.Fatal("expected cached error")
+	}
+
+	// 等待错误过期。
+	time.Sleep(connErrTTL + 10*time.Millisecond)
+
+	// 过期后重试拨号（仍然失败，但这是新的拨号而非缓存结果）。
+	_, err3 := p.ListTools(context.Background())
+	if err3 == nil {
+		t.Fatal("expected retry error after expiry")
+	}
 }
