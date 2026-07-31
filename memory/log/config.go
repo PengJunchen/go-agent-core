@@ -135,39 +135,3 @@ func (c *LogConfig) Validate() error {
 	}
 	return nil
 }
-
-// applyDefaults 用默认值填充零值字段，返回副本。
-func (c *LogConfig) applyDefaults() LogConfig {
-	def := DefaultLogConfig()
-	cfg := *c
-
-	if cfg.DataDir == "" {
-		cfg.DataDir = def.DataDir
-	}
-	if cfg.FilePattern == "" {
-		cfg.FilePattern = def.FilePattern
-	}
-	if cfg.BufferSize <= 0 {
-		cfg.BufferSize = def.BufferSize
-	}
-	if cfg.FlushMode == "" {
-		cfg.FlushMode = def.FlushMode
-	}
-	if cfg.FlushIntervalMs <= 0 && cfg.FlushMode == "interval" {
-		cfg.FlushIntervalMs = 1000 // default 1s if interval mode
-	}
-	if cfg.MaxFileSize <= 0 {
-		cfg.MaxFileSize = def.MaxFileSize
-	}
-	if cfg.CrashLogName == "" {
-		cfg.CrashLogName = def.CrashLogName
-	}
-	if cfg.MaxCrashLogSize <= 0 && !cfg.DisableCrashLog {
-		cfg.MaxCrashLogSize = def.MaxCrashLogSize
-	}
-	if cfg.OpenFilePerm == 0 {
-		cfg.OpenFilePerm = def.OpenFilePerm
-	}
-
-	return cfg
-}

@@ -83,6 +83,18 @@ func TestToLogFilter_UnknownLevel(t *testing.T) {
 	}
 }
 
+// TestToLogFilter_UnknownThenValidLevel 验证未知 level 在前时跳过并取首个有效 level。
+// 回归 W3：旧实现 return f 在循环内无条件下返回，导致 ["verbose","info"] 返回空 level。
+func TestToLogFilter_UnknownThenValidLevel(t *testing.T) {
+	sel := LogSelector{
+		Levels: []string{"verbose", "info"},
+	}
+	f := sel.toLogFilter()
+	if f.Level != LogLevelInfo {
+		t.Errorf("expected level %q (skip unknown verbose), got %q", LogLevelInfo, f.Level)
+	}
+}
+
 // TestToLogFilter_TrackType 验证 TrackType 传递到 LogFilter。
 func TestToLogFilter_TrackType(t *testing.T) {
 	sel := LogSelector{

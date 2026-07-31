@@ -74,7 +74,7 @@ func Select(ctx context.Context, sel LogSelector) (*SelectSummary, error) {
 		for _, e := range entries {
 			data, _ := json.Marshal(e)
 			data = append(data, '\n')
-			_, _ = sel.Output.Write(data)
+			_, _ = sel.Output.Write(data) // 写入输出流，忽略写入错误
 		}
 	}
 	return summary, nil
@@ -126,21 +126,25 @@ func (sel LogSelector) toLogFilter() *LogFilter {
 	}
 	// Levels → LogLevel 字段
 	// LogFilter.Level 为单值字段（LogLevel），只取第一个匹配的 level。
-	// 若后续需要多级别过滤，可将 LogFilter.Level 改为 Levels []LogLevel。
+	// 未知 level 跳过继续检查；若后续需要多级别过滤，可将 LogFilter.Level 改为 Levels []LogLevel。
 	for _, l := range sel.Levels {
 		switch l {
 		case "debug":
 			f.Level = LogLevelDebug
+			return f
 		case "info":
 			f.Level = LogLevelInfo
+			return f
 		case "warn":
 			f.Level = LogLevelWarn
+			return f
 		case "error":
 			t := true
 			f.HasError = &t
 			f.Level = LogLevelError
+			return f
 		}
-		return f // 只取第一个匹配的 level，单值字段无需继续
+		// 未知 level 跳过，继续检查下一个
 	}
 	return f
 }

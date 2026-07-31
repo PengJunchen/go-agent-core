@@ -143,10 +143,10 @@ func (s *JSONLSessionSink) ensureWriter() error {
 		return nil
 	}
 	if s.writer != nil {
-		_ = s.writer.Flush()
+		_ = s.writer.Flush() // Close 时刷新缓冲
 	}
 	if s.fd != nil {
-		_ = s.fd.Close()
+		_ = s.fd.Close() // Close 时关闭文件句柄
 	}
 	path := filepath.Join(s.dataDir, name)
 	fd, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)

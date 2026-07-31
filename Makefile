@@ -20,7 +20,7 @@ vet:
 	go vet ./...
 
 lint:
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run ./... || echo " lint: golangci-lint not installed, skipped"
+	@if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run ./...; else echo " lint: golangci-lint not installed, skipped"; fi
 
 ## errcheck: 未检查错误检测（github.com/kisielk/errcheck）。未安装则 skip。
 errcheck:

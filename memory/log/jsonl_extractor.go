@@ -329,12 +329,6 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// listJSONLFiles 列出日志目录下所有 .jsonl 文件（按名升序，向后兼容占位）。
-// 当前逻辑委托给 listJSONLFilesFiltered。
-func (e *JSONLLogExtractor) listJSONLFiles() ([]string, error) {
-	return e.listJSONLFilesFiltered(nil, nil)
-}
-
 // scanFile 扫描单个文件，返回匹配过滤条件的条目（向后兼容）。
 // limit > 0 时在达到上限后提前停止扫描。
 func (e *JSONLLogExtractor) scanFile(path string, filter *LogFilter, limit int) ([]*ExecLogEntry, error) {

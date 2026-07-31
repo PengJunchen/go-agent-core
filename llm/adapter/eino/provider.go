@@ -248,7 +248,7 @@ func emitEvents(ch chan<- stream.StreamEvent, msg *schema.Message) {
 	for _, tc := range msg.ToolCalls {
 		args := make(map[string]any)
 		if tc.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args) // tool call args 容错解析
 		}
 		if len(args) == 0 && tc.Function.Arguments != "" {
 			args["raw"] = tc.Function.Arguments
@@ -414,7 +414,7 @@ func fromAgenticMessage(m *schema.AgenticMessage) *message.Message {
 				fc := block.FunctionToolCall
 				args := make(map[string]any)
 				if fc.Arguments != "" {
-					_ = json.Unmarshal([]byte(fc.Arguments), &args)
+					_ = json.Unmarshal([]byte(fc.Arguments), &args) // tool call args 容错解析 // tool call args 容错解析
 				}
 				out.ToolCalls = append(out.ToolCalls, message.ToolCall{
 					ID: fc.CallID,
@@ -485,7 +485,7 @@ func emitAgenticEvents(ch chan<- stream.StreamEvent, msg *schema.AgenticMessage)
 				fc := block.FunctionToolCall
 				args := make(map[string]any)
 				if fc.Arguments != "" {
-					_ = json.Unmarshal([]byte(fc.Arguments), &args)
+					_ = json.Unmarshal([]byte(fc.Arguments), &args) // tool call args 容错解析
 				}
 				ch <- stream.StreamEvent{
 					Type: stream.StreamToolCallStart,

@@ -74,13 +74,12 @@ func TestVQ_LoggerWriteBuffer(t *testing.T) {
 	}
 
 	// batch 模式下缓冲区未满，不应落盘
-	matches := globLogs(dir, "batch_*.jsonl")
 	// 因为 ensureWriter 在首次 Log 时就创建了文件，且 bufio 可能有部分写入
 	// 我们验证的是关闭后所有数据落盘
 	_ = logger.Close() // 显式关闭以刷新缓冲，错误随后由文件读取验证
 
 	// Close 后文件应存在且有内容
-	matches = globLogs(dir, "batch_*.jsonl")
+	matches := globLogs(dir, "batch_*.jsonl")
 	if len(matches) == 0 {
 		t.Fatal("expected log file after close")
 	}
@@ -728,17 +727,6 @@ func TestLogExtractor_Interface(t *testing.T) {
 // -------------------------------------------------------------------------
 // 辅助函数
 // -------------------------------------------------------------------------
-
-func boolPtr(b bool) *bool { return &b }
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
 
 // TestVC_ExtractWithOptions 验证 ExtractWithOpts 与 ctx 取消。
 func TestVC_ExtractWithOptions(t *testing.T) {

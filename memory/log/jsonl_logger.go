@@ -260,7 +260,7 @@ func (l *JSONLExecLogger) writeTrack(ctx context.Context, track string, data []b
 	}
 	// line 模式立即 flush
 	if l.cfg.FlushMode == "line" {
-		_ = tw.writer.Flush()
+		_ = tw.writer.Flush() // 轮转前刷新缓冲
 	}
 	return nil
 }
@@ -288,12 +288,12 @@ func (tw *trackWriter) ensureWriter(cfg LogConfig) error {
 		if cfg.RotationBySizeEnabled && tw.fd != nil {
 			if fi, err := tw.fd.Stat(); err == nil && fi.Size() >= cfg.MaxFileSize {
 				// 关闭当前文件，生成轮转文件名
-				_ = tw.writer.Flush()
-				_ = tw.fd.Close()
+				_ = tw.writer.Flush() // 轮转前刷新缓冲
+				_ = tw.fd.Close() // Close 时关闭文件句柄 // 关闭旧文件句柄
 				// 重命名当前文件为 .1, .2, ...
 				oldPath := filepath.Join(tw.dir, tw.current)
 				rotatedName := tw.rotatedFileName(cfg)
-				_ = os.Rename(oldPath, filepath.Join(tw.dir, rotatedName))
+				_ = os.Rename(oldPath, filepath.Join(tw.dir, rotatedName)) // 轮转重命名，失败不影响后续
 				tw.fd = nil
 				tw.writer = nil
 				tw.current = ""
@@ -305,10 +305,10 @@ func (tw *trackWriter) ensureWriter(cfg LogConfig) error {
 	}
 	// 日期变更或首次：刷旧文件
 	if tw.writer != nil {
-		_ = tw.writer.Flush()
+		_ = tw.writer.Flush() // 日期变更前刷新旧文件
 	}
 	if tw.fd != nil {
-		_ = tw.fd.Close()
+		_ = tw.fd.Close() // 日期变更前关闭旧文件句柄
 	}
 	path := filepath.Join(tw.dir, name)
 	fd, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, cfg.OpenFilePerm)
@@ -330,8 +330,8 @@ func (l *JSONLExecLogger) crash(err error) error {
 	// append 模式写入，避免并发 crash 互相覆盖
 	f, ferr := os.OpenFile(l.crashLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if ferr == nil {
-		_, _ = f.WriteString(msg)
-		_ = f.Close()
+		_, _ = f.WriteString(msg) // crash 日志写入，忽略错误
+		_ = f.Close() // crash 日志文件关闭
 	}
 	return err
 }
@@ -346,7 +346,7 @@ func (l *JSONLExecLogger) intervalFlush(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = l.Flush(ctx)
+			_ = l.Flush(ctx) // Close 时刷新，忽略错误
 		}
 	}
 }
@@ -369,7 +369,7 @@ func (l *JSONLExecLogger) cleanupOldFiles(days int) {
 				continue
 			}
 			if info.ModTime().Before(cutoff) {
-				_ = os.Remove(filepath.Join(dir, e.Name()))
+				_ = os.Remove(filepath.Join(dir, e.Name())) // 清理过期日志，忽略单个失败
 			}
 		}
 	}

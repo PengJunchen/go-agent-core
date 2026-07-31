@@ -140,7 +140,7 @@ func (b *BoundedEventChannel) Close() error {
 // SetErr 设置错误并关闭通道。
 func (b *BoundedEventChannel) SetErr(err error) {
 	b.err = err
-	_ = b.Close()
+	_ = b.Close() // channel 已关闭，忽略错误
 }
 
 // Dropped 返回累计丢弃的事件数。

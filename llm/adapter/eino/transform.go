@@ -225,7 +225,7 @@ func fromEinoToolCalls(tcs []schema.ToolCall) []message.ToolCall {
 	for _, tc := range tcs {
 		args := make(map[string]any)
 		if tc.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args) // tool call args 容错解析
 		}
 		out = append(out, message.ToolCall{
 			ID: tc.ID,

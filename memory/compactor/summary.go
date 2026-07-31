@@ -403,7 +403,7 @@ func (sc *SummaryCompactor) buildPrompt(conversationText string, fileOps []fileO
 		sb.WriteString(conversationText)
 		sb.WriteString("\n\n--- File Operations ---\n")
 		for _, op := range fileOps {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", op.Tool, op.Path))
+			fmt.Fprintf(&sb, "- %s: %s\n", op.Tool, op.Path)
 		}
 		conversationText = sb.String()
 	}

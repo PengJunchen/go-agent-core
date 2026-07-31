@@ -328,13 +328,12 @@ func (s *JSONLSessionStore) appendEntry(ctx context.Context, entryType string, d
 		if sd, ok := data.(interface{ GetSessionID() string }); ok {
 			sessID = sd.GetSessionID()
 		}
-		if err := s.sink.Append(ctx, SessionEntry{
+		// Sink 失败不阻断主流程，降级到本地文件
+		_ = s.sink.Append(ctx, SessionEntry{ // Sink 失败不阻断主流程，降级到本地文件
 			EntryType: entryType,
 			SessionID: sessID,
 			Data: data,
-		}); err != nil {
-			// Sink 失败不阻断主流程，降级到本地文件
-		}
+		})
 	}
 
 	select {

@@ -247,8 +247,8 @@ func FormatViolations(violations []Violation) string {
 	}
 	var sb strings.Builder
 	for _, v := range violations {
-		sb.WriteString(fmt.Sprintf("❌ %s [%s] %s:%d — %s\n",
-			v.RuleID, v.Severity, v.File, v.Line, v.Message))
+		fmt.Fprintf(&sb, "❌ %s [%s] %s:%d — %s\n",
+			v.RuleID, v.Severity, v.File, v.Line, v.Message)
 	}
 	return sb.String()
 }
