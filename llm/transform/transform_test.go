@@ -2,6 +2,10 @@ package transform
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/pengjunchen/go-agent-core/llm/message"
@@ -126,5 +130,630 @@ func TestDefaultTransformer_TransformAnyProvider(t *testing.T) {
 		if len(out) != 1 {
 			t.Errorf("provider %q: output count = %d, want 1", p, len(out))
 		}
+	}
+}
+
+// ========== 深拷贝测试 ==========
+
+// VT-008: Transform 深拷贝 Content 切片，修改输出不影响输入。
+func TestDefaultTransformer_DeepCopyContent(t *testing.T) {
+	dt := &DefaultTransformer{} // 全部关闭，只测深拷贝
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{{Type: message.ContentText, Text: "original"}},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	out[0].Content[0].Text = "modified"
+	if in[0].Content[0].Text != "original" {
+		t.Errorf("input content changed to %q after modifying output, want 'original'", in[0].Content[0].Text)
+	}
+}
+
+// VT-009: Transform 深拷贝 ToolCalls 切片，修改输出不影响输入。
+func TestDefaultTransformer_DeepCopyToolCalls(t *testing.T) {
+	dt := &DefaultTransformer{} // 全部关闭，只测深拷贝
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: "call_123", Name: "search", Arguments: map[string]any{"q": "hello"}},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	out[0].ToolCalls[0].ID = "call_modified"
+	if in[0].ToolCalls[0].ID != "call_123" {
+		t.Errorf("input ToolCall.ID changed to %q, want 'call_123'", in[0].ToolCalls[0].ID)
+	}
+}
+
+// VT-010: Transform 深拷贝 Image 指针，修改输出不影响输入。
+func TestDefaultTransformer_DeepCopyImage(t *testing.T) {
+	dt := &DefaultTransformer{} // 全部关闭，只测深拷贝
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{
+					Type: message.ContentImage,
+					Image: &message.Image{Data: "base64data", MediaType: "image/png"},
+				},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	out[0].Content[0].Image.Data = "modified"
+	if in[0].Content[0].Image.Data != "base64data" {
+		t.Errorf("input Image.Data changed to %q, want 'base64data'", in[0].Content[0].Image.Data)
+	}
+}
+
+// ========== ToolCallIdClamp 测试 ==========
+
+// VT-011: ToolCallIdClamp 截断过长的 ToolCall ID。
+func TestToolCallIdClamp_Truncates(t *testing.T) {
+	dt := &DefaultTransformer{ToolCallIdClamp: 16}
+	longID := "call_abcdefghijklmnopqrstuvwxyz_0123456789"
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: longID, Name: "search"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	clamped := out[0].ToolCalls[0].ID
+	if len(clamped) > 16 {
+		t.Errorf("clamped ID length = %d, want <= 16, got %q", len(clamped), clamped)
+	}
+	// 验证前缀保留
+	expectedPrefix := longID[:8] // clamp-8 = 16-8 = 8
+	if !strings.HasPrefix(clamped, expectedPrefix) {
+		t.Errorf("clamped ID = %q, want prefix %q", clamped, expectedPrefix)
+	}
+}
+
+// VT-012: ToolCallIdClamp 清理非法字符。
+func TestToolCallIdClamp_SanitizesInvalidChars(t *testing.T) {
+	dt := &DefaultTransformer{ToolCallIdClamp: 64}
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: "call_abc!@#def", Name: "search"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	clamped := out[0].ToolCalls[0].ID
+	// 非法字符应该被替换为下划线
+	for _, ch := range clamped {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+			t.Errorf("clamped ID contains invalid char %q in %q", ch, clamped)
+		}
+	}
+}
+
+// VT-013: ToolCallIdClamp 对 Tool 角色消息的 ToolCallID 做截断。
+func TestToolCallIdClamp_ClampsToolCallID(t *testing.T) {
+	dt := &DefaultTransformer{ToolCallIdClamp: 16}
+	longID := "call_abcdefghijklmnopqrstuvwxyz_0123456789"
+	in := []message.Message{
+		{
+			Role: message.RoleTool,
+			ToolCallID: longID,
+			Content: []message.Content{{Type: message.ContentText, Text: "result"}},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	clamped := out[0].ToolCallID
+	if len(clamped) > 16 {
+		t.Errorf("clamped ToolCallID length = %d, want <= 16, got %q", len(clamped), clamped)
+	}
+}
+
+// VT-014: ToolCallIdClamp 不影响合规短 ID。
+func TestToolCallIdClamp_ShortIDPreserved(t *testing.T) {
+	dt := &DefaultTransformer{ToolCallIdClamp: 64}
+	shortID := "call_abc123"
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: shortID, Name: "search"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].ToolCalls[0].ID != shortID {
+		t.Errorf("short ID changed from %q to %q, should be preserved", shortID, out[0].ToolCalls[0].ID)
+	}
+}
+
+// VT-015: ToolCallIdClamp 截断结果确定性（多次调用结果一致）。
+func TestToolCallIdClamp_Deterministic(t *testing.T) {
+	dt := &DefaultTransformer{ToolCallIdClamp: 16}
+	longID := "call_abcdefghijklmnopqrstuvwxyz_0123456789"
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: longID, Name: "search"},
+			},
+		},
+	}
+	out1, _ := dt.Transform(context.Background(), in, "anthropic")
+	out2, _ := dt.Transform(context.Background(), in, "anthropic")
+	if out1[0].ToolCalls[0].ID != out2[0].ToolCalls[0].ID {
+		t.Errorf("non-deterministic clamp: %q vs %q", out1[0].ToolCalls[0].ID, out2[0].ToolCalls[0].ID)
+	}
+}
+
+// VT-016: clampID 截断格式验证：前缀 + "-" + 7 字符 hash 后缀。
+func TestClampID_Format(t *testing.T) {
+	longID := "call_abcdefghijklmnopqrstuvwxyz_0123456789"
+	clamp := 16
+	result := clampID(longID, clamp)
+
+	// 验证长度
+	if len(result) != clamp {
+		t.Errorf("clampID result length = %d, want %d", len(result), clamp)
+	}
+
+	// 验证结构：prefix + "-" + 7-char-hash
+	expectedPrefixLen := clamp - 8 // 8
+	prefix := longID[:expectedPrefixLen]
+	if !strings.HasPrefix(result, prefix+"-") {
+		t.Errorf("clampID result = %q, want prefix %q + '-'", result, prefix)
+	}
+
+	// 验证 hash 后缀是 hex 编码
+	suffix := result[expectedPrefixLen+1:]
+	hash := sha256.Sum256([]byte(longID))
+	expectedSuffix := hex.EncodeToString(hash[:])[:7]
+	if suffix != expectedSuffix {
+		t.Errorf("hash suffix = %q, want %q", suffix, expectedSuffix)
+	}
+}
+
+// VT-017: ToolCallIdClamp=0 时不应用截断。
+func TestToolCallIdClamp_DisabledWhenZero(t *testing.T) {
+	dt := &DefaultTransformer{ToolCallIdClamp: 0}
+	longID := strings.Repeat("a", 100)
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: longID, Name: "search"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].ToolCalls[0].ID != longID {
+		t.Errorf("ID was clamped when ToolCallIdClamp=0, got %q", out[0].ToolCalls[0].ID)
+	}
+}
+
+// ========== ImageFallback 测试 ==========
+
+// VT-018: ImageFallback 对不支持视觉的 provider 替换图片为文本占位符。
+func TestImageFallback_ReplacesForNonVisionProvider(t *testing.T) {
+	dt := &DefaultTransformer{ImageFallback: true}
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{
+					Type: message.ContentImage,
+					Image: &message.Image{Data: "base64data", MediaType: "image/png"},
+				},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "text-only")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("content type = %v, want ContentText", out[0].Content[0].Type)
+	}
+	expected := fmt.Sprintf("[Image: %s, %d bytes]", "image/png", len("base64data"))
+	if out[0].Content[0].Text != expected {
+		t.Errorf("placeholder = %q, want %q", out[0].Content[0].Text, expected)
+	}
+}
+
+// VT-019: ImageFallback 对空 provider 替换图片为文本占位符。
+func TestImageFallback_ReplacesForEmptyProvider(t *testing.T) {
+	dt := &DefaultTransformer{ImageFallback: true}
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{
+					Type: message.ContentImage,
+					Image: &message.Image{Data: "data123", MediaType: "image/jpeg"},
+				},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("content type = %v, want ContentText", out[0].Content[0].Type)
+	}
+}
+
+// VT-020: ImageFallback 不影响支持视觉的 provider（anthropic）。
+func TestImageFallback_PreservesForAnthropic(t *testing.T) {
+	dt := &DefaultTransformer{ImageFallback: true}
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{
+					Type: message.ContentImage,
+					Image: &message.Image{Data: "base64data", MediaType: "image/png"},
+				},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentImage {
+		t.Errorf("content type = %v, want ContentImage for anthropic", out[0].Content[0].Type)
+	}
+}
+
+// VT-021: ImageFallback 不影响支持视觉的 provider（openai）。
+func TestImageFallback_PreservesForOpenAI(t *testing.T) {
+	dt := &DefaultTransformer{ImageFallback: true}
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{
+					Type: message.ContentImage,
+					Image: &message.Image{Data: "base64data", MediaType: "image/png"},
+				},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentImage {
+		t.Errorf("content type = %v, want ContentImage for openai", out[0].Content[0].Type)
+	}
+}
+
+// VT-022: ImageFallback=false 时不替换图片。
+func TestImageFallback_Disabled(t *testing.T) {
+	dt := &DefaultTransformer{ImageFallback: false}
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{
+					Type: message.ContentImage,
+					Image: &message.Image{Data: "base64data", MediaType: "image/png"},
+				},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "text-only")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentImage {
+		t.Errorf("ImageFallback disabled but image was replaced, type = %v", out[0].Content[0].Type)
+	}
+}
+
+// VT-023: ImageFallback 只替换图片块，保留文本块。
+func TestImageFallback_OnlyReplacesImages(t *testing.T) {
+	dt := &DefaultTransformer{ImageFallback: true}
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentText, Text: "hello"},
+				{Type: message.ContentImage, Image: &message.Image{Data: "data", MediaType: "image/png"}},
+				{Type: message.ContentText, Text: "world"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "text-only")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Text != "hello" {
+		t.Errorf("first text block changed to %q", out[0].Content[0].Text)
+	}
+	if out[0].Content[1].Type != message.ContentText {
+		t.Errorf("image block not replaced, type = %v", out[0].Content[1].Type)
+	}
+	if out[0].Content[2].Text != "world" {
+		t.Errorf("third text block changed to %q", out[0].Content[2].Text)
+	}
+}
+
+// ========== ThinkingAdapter 测试 ==========
+
+// VT-024: ThinkingAdapter 对 OpenAI provider 将思维块转为文本。
+func TestThinkingAdapter_ConvertsForOpenAI(t *testing.T) {
+	dt := &DefaultTransformer{ThinkingAdapter: true}
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "let me think about this"},
+				{Type: message.ContentText, Text: "here is my answer"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("thinking block type = %v, want ContentText", out[0].Content[0].Type)
+	}
+	if out[0].Content[0].Text != "[Thinking] let me think about this" {
+		t.Errorf("thinking block text = %q, want '[Thinking] let me think about this'", out[0].Content[0].Text)
+	}
+	if out[0].Content[1].Text != "here is my answer" {
+		t.Errorf("text block changed to %q", out[0].Content[1].Text)
+	}
+}
+
+// VT-025: ThinkingAdapter 对非 OpenAI provider 保持思维块不变。
+func TestThinkingAdapter_PreservesForNonOpenAI(t *testing.T) {
+	dt := &DefaultTransformer{ThinkingAdapter: true}
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "hmm"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("thinking block type = %v, want ContentThinking for anthropic", out[0].Content[0].Type)
+	}
+	if out[0].Content[0].Thinking != "hmm" {
+		t.Errorf("thinking block content = %q, want 'hmm'", out[0].Content[0].Thinking)
+	}
+}
+
+// VT-026: ThinkingAdapter=false 时不转换思维块。
+func TestThinkingAdapter_Disabled(t *testing.T) {
+	dt := &DefaultTransformer{ThinkingAdapter: false}
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "hmm"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("ThinkingAdapter disabled but thinking block was converted, type = %v", out[0].Content[0].Type)
+	}
+}
+
+// ========== 综合测试 ==========
+
+// VT-027: 同时开启所有转换，验证组合效果。
+func TestDefaultTransformer_AllTransformationsCombined(t *testing.T) {
+	dt := &DefaultTransformer{
+		ToolCallIdClamp: 16,
+		ImageFallback: true,
+		ThinkingAdapter: true,
+	}
+	longID := "call_abcdefghijklmnopqrstuvwxyz_0123456789"
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "reasoning"},
+				{Type: message.ContentImage, Image: &message.Image{Data: "imgdata", MediaType: "image/png"}},
+				{Type: message.ContentText, Text: "response"},
+			},
+			ToolCalls: []message.ToolCall{
+				{ID: longID, Name: "search"},
+			},
+		},
+		{
+			Role: message.RoleTool,
+			ToolCallID: longID,
+			Content: []message.Content{{Type: message.ContentText, Text: "result"}},
+		},
+	}
+	// 用 "text-only" provider 触发 image fallback
+	// 但 openai 会触发 thinking adapter，用 "openai" 不能触发 image fallback
+	// 用 "unknown" provider: image fallback 生效, thinking adapter 不生效
+	out, err := dt.Transform(context.Background(), in, "unknown")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+
+	// 消息0: ToolCall ID 应被截断
+	if len(out[0].ToolCalls[0].ID) > 16 {
+		t.Errorf("ToolCall ID not clamped: %q", out[0].ToolCalls[0].ID)
+	}
+	// 消息0: 思维块不应被转换（非 openai）
+	if out[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("thinking block converted for non-openai provider, type = %v", out[0].Content[0].Type)
+	}
+	// 消息0: 图片应被替换
+	if out[0].Content[1].Type != message.ContentText {
+		t.Errorf("image block not replaced for non-vision provider, type = %v", out[0].Content[1].Type)
+	}
+	// 消息0: 文本应保留
+	if out[0].Content[2].Text != "response" {
+		t.Errorf("text block changed to %q", out[0].Content[2].Text)
+	}
+	// 消息1: ToolCallID 应被截断
+	if len(out[1].ToolCallID) > 16 {
+		t.Errorf("ToolCallID not clamped: %q", out[1].ToolCallID)
+	}
+}
+
+// VT-028: 全部关闭时，Transform 等同于深拷贝直通。
+func TestDefaultTransformer_AllDisabledIsDeepCopy(t *testing.T) {
+	dt := &DefaultTransformer{} // 全部为零值/false
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "hmm"},
+				{Type: message.ContentImage, Image: &message.Image{Data: "data", MediaType: "image/png"}},
+				{Type: message.ContentText, Text: "text"},
+			},
+			ToolCalls: []message.ToolCall{
+				{ID: strings.Repeat("x", 100), Name: "tool"},
+			},
+		},
+	}
+	out, err := dt.Transform(context.Background(), in, "unknown")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	// 思维块不变
+	if out[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("thinking block type changed when all disabled")
+	}
+	// 图片不变
+	if out[0].Content[1].Type != message.ContentImage {
+		t.Errorf("image block type changed when all disabled")
+	}
+	// 长ID不变
+	if out[0].ToolCalls[0].ID != strings.Repeat("x", 100) {
+		t.Errorf("ToolCall ID clamped when all disabled")
+	}
+}
+
+// VT-029: Transform 不修改输入切片（ToolCallID 场景）。
+func TestDefaultTransformer_DoesNotModifyInput_ToolCallID(t *testing.T) {
+	dt := &DefaultTransformer{ToolCallIdClamp: 16}
+	longID := "call_abcdefghijklmnopqrstuvwxyz_0123456789"
+	in := []message.Message{
+		{
+			Role: message.RoleTool,
+			ToolCallID: longID,
+			Content: []message.Content{{Type: message.ContentText, Text: "result"}},
+		},
+	}
+	_, err := dt.Transform(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if in[0].ToolCallID != longID {
+		t.Errorf("input ToolCallID was modified: got %q, want %q", in[0].ToolCallID, longID)
+	}
+}
+
+// VT-030: Transform 不修改输入切片（Image 场景）。
+func TestDefaultTransformer_DoesNotModifyInput_Image(t *testing.T) {
+	dt := &DefaultTransformer{ImageFallback: true}
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{
+					Type: message.ContentImage,
+					Image: &message.Image{Data: "base64data", MediaType: "image/png"},
+				},
+			},
+		},
+	}
+	_, err := dt.Transform(context.Background(), in, "text-only")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if in[0].Content[0].Type != message.ContentImage {
+		t.Errorf("input image content type was modified")
+	}
+}
+
+// VT-031: Transform 不修改输入切片（Thinking 场景）。
+func TestDefaultTransformer_DoesNotModifyInput_Thinking(t *testing.T) {
+	dt := &DefaultTransformer{ThinkingAdapter: true}
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "original thought"},
+			},
+		},
+	}
+	_, err := dt.Transform(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if in[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("input thinking content type was modified")
+	}
+	if in[0].Content[0].Thinking != "original thought" {
+		t.Errorf("input thinking content was modified: %q", in[0].Content[0].Thinking)
+	}
+}
+
+// VT-032: nil 切片消息内容处理。
+func TestDefaultTransformer_NilContentAndToolCalls(t *testing.T) {
+	dt := NewDefaultTransformer()
+	in := []message.Message{
+		{Role: message.RoleUser}, // Content 和 ToolCalls 都是 nil
+	}
+	out, err := dt.Transform(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	if len(out) != 1 {
+		t.Errorf("output count = %d, want 1", len(out))
+	}
+	if out[0].Content != nil {
+		t.Errorf("expected nil Content for nil input, got %v", out[0].Content)
 	}
 }
