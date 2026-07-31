@@ -3,7 +3,6 @@ package mcp
 import (
 	"encoding/json"
 	"io"
-	"sync"
 	"testing"
 )
 
@@ -117,11 +116,3 @@ func assertTransportTools(t *testing.T, tools []Tool, want []string) {
 		}
 	}
 }
-
-// onceClose 确保清理仅执行一次（测试夹具用）。
-type onceClose struct {
-	once sync.Once
-	fn func()
-}
-
-func (o *onceClose) close() { o.once.Do(o.fn) }

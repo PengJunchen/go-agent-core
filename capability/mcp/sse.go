@@ -46,7 +46,7 @@ func parseSSE(r io.Reader, onEvent func(event, data string)) error {
 			rest := strings.TrimPrefix(line, "data:")
 			rest = strings.TrimPrefix(rest, " ")
 			dataParts = append(dataParts, rest)
-		case strings.HasPrefix(line, ":"):
+		case line[0] == ':':
 			// 注释行，忽略。
 		default:
 			// 未知行，忽略。

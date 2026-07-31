@@ -36,12 +36,6 @@ func newSSETestServer(t *testing.T, tools []Tool) *sseTestServer {
 	return &sseTestServer{t: t, tools: tools, ready: make(chan struct{})}
 }
 
-func (s *sseTestServer) resetReady() {
-	s.mu.Lock()
-	s.ready = make(chan struct{})
-	s.mu.Unlock()
-}
-
 func (s *sseTestServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sse", s.serveSSE)
