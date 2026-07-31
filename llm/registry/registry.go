@@ -64,5 +64,17 @@ func (r *ProviderRegistry) ListProviders() []string {
 	return names
 }
 
+// SwapProvider 原子替换已注册的 Provider 工厂（线程安全）。
+// 如果 name 不存在，返回错误。
+func (r *ProviderRegistry) SwapProvider(name string, factory ProviderFactory) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.factories[name]; !ok {
+		return fmt.Errorf("unknown provider: %s", name)
+	}
+	r.factories[name] = factory
+	return nil
+}
+
 // DefaultRegistry 是全局默认注册表，供 init() 自注册使用。
 var DefaultRegistry = NewProviderRegistry()
