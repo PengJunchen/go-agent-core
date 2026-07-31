@@ -225,7 +225,7 @@ func NewDefaultMCPProvider() *DefaultMCPProvider {
 // errs 与 servers 一一对应，nil 表示该 server 连接成功。
 func (p *DefaultMCPProvider) Connect(ctx context.Context, servers []MCPServerConfig) ([]ToolRef, []func(), []error) {
 	// 重置既有连接。
-	_ = p.disconnectLocked()
+	_ = p.disconnectLocked() // cleanup: 断开所有连接，忽略错误
 
 	var allTools []ToolRef
 	cleanups := make([]func(), 0, len(servers))
@@ -240,7 +240,7 @@ func (p *DefaultMCPProvider) Connect(ctx context.Context, servers []MCPServerCon
 		tools, err := t.ListTools(ctx)
 		if err != nil {
 			errs[i] = err
-			_ = t.Close()
+			_ = t.Close() // cleanup: 关闭传输连接
 			continue
 		}
 		p.mu.Lock()
@@ -258,7 +258,7 @@ func (p *DefaultMCPProvider) Connect(ctx context.Context, servers []MCPServerCon
 		transport := t
 		name := s.Name
 		cleanups = append(cleanups, func() {
-			_ = transport.Close()
+			_ = transport.Close() // cleanup: 关闭传输连接
 			p.mu.Lock()
 			delete(p.transports, name)
 			p.mu.Unlock()
@@ -289,7 +289,7 @@ func (p *DefaultMCPProvider) disconnectLocked() error {
 
 // Reload 断开既有连接后重新连接。
 func (p *DefaultMCPProvider) Reload(ctx context.Context, servers []MCPServerConfig) ([]ToolRef, []func(), []error) {
-	_ = p.disconnectLocked()
+	_ = p.disconnectLocked() // cleanup: 断开所有连接，忽略错误
 	return p.Connect(ctx, servers)
 }
 

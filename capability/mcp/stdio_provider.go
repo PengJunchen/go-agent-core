@@ -99,12 +99,12 @@ func (p *StdioMCPProvider) defaultDial(ctx context.Context) (rpcConn, error) {
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		_ = stdin.Close()
+		_ = stdin.Close() // cleanup: 关闭子进程 stdin
 		return nil, fmt.Errorf("mcp stdio: stdout pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
+		_ = stdin.Close() // cleanup: 关闭子进程 stdin
+		_ = stdout.Close() // cleanup: 关闭子进程 stdout
 		return nil, fmt.Errorf("mcp stdio: start process: %w", err)
 	}
 	rw := &stdioRW{w: stdin, r: stdout}
@@ -207,11 +207,11 @@ type processCloser struct {
 }
 
 func (pc *processCloser) Close() error {
-	_ = pc.stdin.Close()
-	_ = pc.stdout.Close()
+	_ = pc.stdin.Close() // cleanup: 关闭子进程 stdin
+	_ = pc.stdout.Close() // cleanup: 关闭子进程 stdout
 	if pc.cmd.Process != nil {
-		_ = pc.cmd.Process.Kill()
-		_ = pc.cmd.Wait()
+		_ = pc.cmd.Process.Kill() // cleanup: 强制终止子进程
+		_ = pc.cmd.Wait() // cleanup: 回收子进程资源
 	}
 	return nil
 }

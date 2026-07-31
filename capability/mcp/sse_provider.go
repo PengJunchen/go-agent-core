@@ -81,7 +81,7 @@ func (p *SSEMCPProvider) resetConn(err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.conn != nil {
-		_ = p.conn.close()
+		_ = p.conn.close() // cleanup: 关闭 SSE 连接，忽略已关闭错误
 	}
 	p.conn = nil
 	p.base = nil
@@ -174,7 +174,7 @@ func (c *sseConn) connect(ctx context.Context) error {
 		return fmt.Errorf("mcp sse: connect: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		_ = resp.Body.Close()
+		_ = resp.Body.Close() // cleanup: 关闭响应体，忽略已关闭错误
 		return fmt.Errorf("mcp sse: connect returned %s", resp.Status)
 	}
 	// 读取 SSE 流直到拿到 endpoint 事件，期间把 message 事件喂给读泵。
@@ -192,21 +192,21 @@ func (c *sseConn) connect(ctx context.Context) error {
 	// 先取 endpoint 事件。
 	select {
 	case <-ctx.Done():
-		_ = resp.Body.Close()
+		_ = resp.Body.Close() // cleanup: 关闭响应体，忽略已关闭错误
 		return ctx.Err()
 	case m := <-evCh:
 		if m.event != "endpoint" {
-			_ = resp.Body.Close()
+			_ = resp.Body.Close() // cleanup: 关闭响应体，忽略已关闭错误
 			return fmt.Errorf("mcp sse: expected endpoint event, got %q", m.event)
 		}
 		ep, err := resolveURL(c.url, m.data)
 		if err != nil {
-			_ = resp.Body.Close()
+			_ = resp.Body.Close() // cleanup: 关闭响应体，忽略已关闭错误
 			return fmt.Errorf("mcp sse: resolve endpoint: %w", err)
 		}
 		c.endpoint = ep
 	case err := <-parseErr:
-		_ = resp.Body.Close()
+		_ = resp.Body.Close() // cleanup: 关闭响应体，忽略已关闭错误
 		if err != nil {
 			return fmt.Errorf("mcp sse: read stream: %w", err)
 		}
@@ -264,8 +264,8 @@ func (c *sseConn) call(ctx context.Context, req *rpcRequest) (*rpcResponse, erro
 	if err != nil {
 		return nil, fmt.Errorf("mcp sse: post request: %w", err)
 	}
-	_, _ = io.Copy(io.Discard, postResp.Body)
-	_ = postResp.Body.Close()
+	_, _ = io.Copy(io.Discard, postResp.Body) // drain: 丢弃 POST 响应残留体
+	_ = postResp.Body.Close() // cleanup: 关闭 POST 响应体
 	// 等待 SSE 流上匹配 id 的响应。
 	for {
 		select {
@@ -302,8 +302,8 @@ func (c *sseConn) notify(ctx context.Context, n *rpcNotification) error {
 	if err != nil {
 		return err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body) // drain: 丢弃残留响应体
+	_ = resp.Body.Close() // cleanup: 关闭响应体，忽略已关闭错误
 	return nil
 }
 

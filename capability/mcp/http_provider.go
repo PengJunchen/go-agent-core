@@ -104,7 +104,7 @@ func (c *httpConn) call(ctx context.Context, req *rpcRequest) (*rpcResponse, err
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // cleanup: 关闭响应体，忽略已关闭错误
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("mcp http: server returned %s", resp.Status)
 	}
@@ -140,8 +140,8 @@ func (c *httpConn) notify(ctx context.Context, n *rpcNotification) error {
 	if err != nil {
 		return err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body) // drain: 丢弃残留响应体，忽略拷贝错误
+	_ = resp.Body.Close() // cleanup: 关闭响应体，忽略已关闭错误
 	return nil
 }
 
