@@ -42,8 +42,10 @@ type ExecutionNotifier interface {
 type ToolExecutionUpdate struct {
 	ToolCallID string
 	ToolName string
-	Status string // "started", "completed", "failed"
+	Status string // "started", "progress", "completed", "failed"
 	Error error
+	Progress float64 // 0.0 - 1.0，可选进度指示
+	Message string // 可选状态消息
 }
 
 // ParallelToolExecutor 在安全时并行执行多个工具调用。
@@ -225,6 +227,7 @@ func (e *ParallelToolExecutor) executeOne(ctx context.Context, call ToolCall, re
 		ToolCallID: call.ID,
 		ToolName: call.Name,
 		Status: "completed",
+		Progress: 1.0, // completed means full progress
 	})
 	return &ToolExecutionResult{
 		Call: call,

@@ -56,6 +56,91 @@ func TestParallelToolExecutor_Sequential(t *testing.T) {
 	}
 }
 
+// PE-008: ToolExecutionUpdate Progress 和 Message 字段可正确设置。
+func TestToolExecutionUpdate_ProgressField(t *testing.T) {
+	u := ToolExecutionUpdate{
+		ToolCallID: "tc-1",
+		ToolName: "search",
+		Status: "progress",
+		Progress: 0.5,
+		Message: "halfway done",
+	}
+	if u.Progress != 0.5 {
+		t.Errorf("Progress = %f, want 0.5", u.Progress)
+	}
+	if u.Message != "halfway done" {
+		t.Errorf("Message = %q, want 'halfway done'", u.Message)
+	}
+}
+
+// PE-009: ToolExecutionUpdate Progress 和 Message 零值正确。
+func TestToolExecutionUpdate_ZeroValueFields(t *testing.T) {
+	u := ToolExecutionUpdate{
+		ToolCallID: "tc-1",
+		ToolName: "search",
+		Status: "started",
+	}
+	if u.Progress != 0 {
+		t.Errorf("Progress = %f, want 0", u.Progress)
+	}
+	if u.Message != "" {
+		t.Errorf("Message = %q, want empty", u.Message)
+	}
+}
+
+// PE-010: completed 通知携带 Progress=1.0，started 通知 Progress=0。
+func TestParallelToolExecutor_CompletedProgress(t *testing.T) {
+	reg := NewDefaultToolRegistry()
+	_ = reg.RegisterTool(context.Background(), ToolDefinition{
+		Name: "tool1",
+		Handler: func(_ context.Context, _ map[string]any) (*ToolResult, error) {
+			return &ToolResult{Content: "ok"}, nil
+		},
+	})
+
+	var mu sync.Mutex
+	var updates []ToolExecutionUpdate
+	notifier := &captureNotifier{mu: &mu, updates: &updates}
+
+	exec := NewParallelToolExecutor(ExecutionSequential, 0, notifier)
+	calls := []ToolCall{{Name: "tool1", ID: "c1"}}
+	results := exec.ExecuteTools(context.Background(), calls, reg)
+	if len(results) != 1 || results[0].Error != nil {
+		t.Fatalf("unexpected result: %+v", results)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 updates, got %d", len(updates))
+	}
+	// started
+	if updates[0].Status != "started" {
+		t.Errorf("updates[0].Status = %q, want 'started'", updates[0].Status)
+	}
+	if updates[0].Progress != 0 {
+		t.Errorf("updates[0].Progress = %f, want 0", updates[0].Progress)
+	}
+	// completed
+	if updates[1].Status != "completed" {
+		t.Errorf("updates[1].Status = %q, want 'completed'", updates[1].Status)
+	}
+	if updates[1].Progress != 1.0 {
+		t.Errorf("updates[1].Progress = %f, want 1.0", updates[1].Progress)
+	}
+}
+
+type captureNotifier struct {
+	mu *sync.Mutex
+	updates *[]ToolExecutionUpdate
+}
+
+func (n *captureNotifier) NotifyToolExecution(update ToolExecutionUpdate) {
+	n.mu.Lock()
+	*n.updates = append(*n.updates, update)
+	n.mu.Unlock()
+}
+
 // PE-002: 并行模式并发执行 ParallelSafe 工具。
 func TestParallelToolExecutor_Parallel(t *testing.T) {
 	reg := NewDefaultToolRegistry()
