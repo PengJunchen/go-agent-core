@@ -164,6 +164,11 @@ type ApprovalHook struct {
 	submissionID string
 	sessionID string
 	turnID string
+
+	// OnSuspend is called before blocking for approval (Running → WaitingApproval).
+	OnSuspend func()
+	// OnResume is called after the approval decision is made (WaitingApproval → Running).
+	OnResume func()
 }
 
 // NewApprovalHook 创建一个 ApprovalHook。
@@ -222,7 +227,18 @@ func (h *ApprovalHook) Before(ctx context.Context, call *toolhook.ToolCall) (*to
 		TurnID: call.TurnID,
 	}
 
+	// 通知 Agent 转入 WaitingApproval 状态
+	if h.OnSuspend != nil {
+		h.OnSuspend()
+	}
+
 	decision, err := h.hitl.RequestApproval(ctx, req)
+
+	// 通知 Agent 恢复到 Running 状态
+	if h.OnResume != nil {
+		h.OnResume()
+	}
+
 	if err != nil {
 		return &toolhook.BeforeResult{Block: true, Reason: fmt.Sprintf("approval error: %v", err)}, nil
 	}

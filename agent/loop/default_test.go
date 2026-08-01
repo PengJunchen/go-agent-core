@@ -1863,3 +1863,108 @@ func TestBuilderWithCompactThreshold(t *testing.T) {
 		t.Errorf("compactThreshold = %d, want 8192", agent.compactThreshold)
 	}
 }
+
+// ─── TransitionToWaitingApproval / TransitionToRunning Tests ──────
+
+// TestDefaultLoopAgent_TransitionToWaitingApproval tests that
+// TransitionToWaitingApproval transitions from Running to WaitingApproval.
+func TestDefaultLoopAgent_TransitionToWaitingApproval(t *testing.T) {
+	slowProvider := &slowMockProvider{}
+	cm := ctxpkg.NewHeuristicContextManager()
+	tr := registry.NewDefaultToolRegistry()
+
+	cfg := &LoopAgentConfig{
+		Provider: slowProvider,
+		ContextManager: cm,
+		ToolRegistry: tr,
+		MaxTurns: DefaultMaxTurns,
+	}
+
+	agent, err := NewDefaultLoopAgent(cfg)
+	if err != nil {
+		t.Fatalf("NewDefaultLoopAgent: %v", err)
+	}
+
+	// Must be Running first
+	ch, err := agent.Query(stdcontext.Background(), AgentInput{Prompt: "test"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	// Wait until Running
+	time.Sleep(50 * time.Millisecond)
+	if agent.Status() != event.StatusRunning {
+		t.Fatalf("expected Running, got %v", agent.Status())
+	}
+
+	// Transition to WaitingApproval
+	agent.TransitionToWaitingApproval()
+	if agent.Status() != event.StatusWaitingApproval {
+		t.Errorf("status = %v, want %v", agent.Status(), event.StatusWaitingApproval)
+	}
+
+	// Transition back to Running
+	agent.TransitionToRunning()
+	if agent.Status() != event.StatusRunning {
+		t.Errorf("status = %v, want %v", agent.Status(), event.StatusRunning)
+	}
+
+	// Clean up
+	_ = agent.Interrupt(stdcontext.Background())
+	_ = collectEvents(ch, 2*time.Second)
+}
+
+// TestDefaultLoopAgent_TransitionToWaitingApprovalFromIdle tests that
+// TransitionToWaitingApproval does NOT transition from Idle (invalid transition).
+func TestDefaultLoopAgent_TransitionToWaitingApprovalFromIdle(t *testing.T) {
+	agent, _ := setupAgent(nil, 0)
+
+	if agent.Status() != event.StatusIdle {
+		t.Fatalf("expected Idle, got %v", agent.Status())
+	}
+
+	// This should be a no-op (Idle → WaitingApproval is invalid)
+	agent.TransitionToWaitingApproval()
+	if agent.Status() != event.StatusIdle {
+		t.Errorf("status should remain Idle after invalid transition, got %v", agent.Status())
+	}
+}
+
+// TestDefaultLoopAgent_TransitionToRunningFromWaitingApproval tests the
+// full round-trip: Running → WaitingApproval → Running.
+func TestDefaultLoopAgent_TransitionToRunningFromWaitingApproval(t *testing.T) {
+	slowProvider := &slowMockProvider{}
+	cm := ctxpkg.NewHeuristicContextManager()
+	tr := registry.NewDefaultToolRegistry()
+
+	cfg := &LoopAgentConfig{
+		Provider: slowProvider,
+		ContextManager: cm,
+		ToolRegistry: tr,
+		MaxTurns: DefaultMaxTurns,
+	}
+
+	agent, err := NewDefaultLoopAgent(cfg)
+	if err != nil {
+		t.Fatalf("NewDefaultLoopAgent: %v", err)
+	}
+
+	ch, err := agent.Query(stdcontext.Background(), AgentInput{Prompt: "test"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Running → WaitingApproval → Running
+	agent.TransitionToWaitingApproval()
+	agent.TransitionToRunning()
+
+	if agent.Status() != event.StatusRunning {
+		t.Errorf("status = %v, want %v", agent.Status(), event.StatusRunning)
+	}
+
+	// Clean up
+	_ = agent.Interrupt(stdcontext.Background())
+	_ = collectEvents(ch, 2*time.Second)
+}

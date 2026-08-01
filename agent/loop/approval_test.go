@@ -424,3 +424,207 @@ func TestApprovalHook_CacheDeniedHit(t *testing.T) {
 		t.Errorf("handler called %d times, want 0 (should use cache)", handler.callCount())
 	}
 }
+
+// ─── OnSuspend / OnResume Tests ──────────────────────────────────
+
+// TestApprovalHook_OnSuspendOnResume tests that OnSuspend and OnResume
+// are called when the hook blocks for approval and when it resumes.
+func TestApprovalHook_OnSuspendOnResume(t *testing.T) {
+	handler := &mockApprovalHandler{decision: ApprovalApprove}
+	hitl := NewHITLManager(handler, 0)
+
+	var suspendCalled, resumeCalled bool
+	hook := NewApprovalHook(hitl, nil, "sub-1", "sess-1", "turn-1")
+	hook.OnSuspend = func() { suspendCalled = true }
+	hook.OnResume = func() { resumeCalled = true }
+
+	call := &toolhook.ToolCall{
+		ID: "tc-1",
+		Name: "search",
+		Arguments: map[string]any{"q": "test"},
+	}
+
+	result, err := hook.Before(context.Background(), call)
+	if err != nil {
+		t.Errorf("Before err = %v", err)
+	}
+	if result.Block {
+		t.Errorf("Block = %v, want false (approved)", result.Block)
+	}
+
+	if !suspendCalled {
+		t.Error("OnSuspend should have been called")
+	}
+	if !resumeCalled {
+		t.Error("OnResume should have been called")
+	}
+}
+
+// TestApprovalHook_OnSuspendNotCalledWhenCached tests that OnSuspend is NOT
+// called when the approval decision is already cached (no blocking occurs).
+func TestApprovalHook_OnSuspendNotCalledWhenCached(t *testing.T) {
+	handler := &mockApprovalHandler{decision: ApprovalApprove}
+	hitl := NewHITLManager(handler, 0)
+
+	// Pre-cache approval so hook doesn't need to block
+	hitl.CacheDecision("search", ApprovalApprove)
+
+	var suspendCalled, resumeCalled bool
+	hook := NewApprovalHook(hitl, nil, "sub-1", "sess-1", "turn-1")
+	hook.OnSuspend = func() { suspendCalled = true }
+	hook.OnResume = func() { resumeCalled = true }
+
+	call := &toolhook.ToolCall{
+		ID: "tc-1",
+		Name: "search",
+		Arguments: map[string]any{"q": "test"},
+	}
+
+	_, _ = hook.Before(context.Background(), call)
+
+	if suspendCalled {
+		t.Error("OnSuspend should NOT be called when cached approval exists")
+	}
+	if resumeCalled {
+		t.Error("OnResume should NOT be called when cached approval exists")
+	}
+}
+
+// TestApprovalHook_OnSuspendNotCalledWhenCachedDeny tests that OnSuspend is NOT
+// called when a cached denial exists (no blocking occurs).
+func TestApprovalHook_OnSuspendNotCalledWhenCachedDeny(t *testing.T) {
+	handler := &mockApprovalHandler{decision: ApprovalApprove}
+	hitl := NewHITLManager(handler, 0)
+
+	// Pre-cache denial
+	hitl.CacheDecision("delete", ApprovalDeny)
+
+	var suspendCalled bool
+	hook := NewApprovalHook(hitl, nil, "sub-1", "sess-1", "turn-1")
+	hook.OnSuspend = func() { suspendCalled = true }
+
+	call := &toolhook.ToolCall{
+		ID: "tc-1",
+		Name: "delete",
+		Arguments: map[string]any{},
+	}
+
+	result, _ := hook.Before(context.Background(), call)
+	if !result.Block {
+		t.Error("should be blocked for cached deny")
+	}
+	if suspendCalled {
+		t.Error("OnSuspend should NOT be called when cached denial exists")
+	}
+}
+
+// TestApprovalHook_OnResumeCalledEvenOnDeny tests that OnResume is called
+// even when the approval decision is Deny.
+func TestApprovalHook_OnResumeCalledEvenOnDeny(t *testing.T) {
+	handler := &mockApprovalHandler{decision: ApprovalDeny}
+	hitl := NewHITLManager(handler, 0)
+
+	var resumeCalled bool
+	hook := NewApprovalHook(hitl, nil, "sub-1", "sess-1", "turn-1")
+	hook.OnSuspend = func() {}
+	hook.OnResume = func() { resumeCalled = true }
+
+	call := &toolhook.ToolCall{
+		ID: "tc-1",
+		Name: "delete",
+		Arguments: map[string]any{},
+	}
+
+	result, _ := hook.Before(context.Background(), call)
+	if !result.Block {
+		t.Error("should be blocked for deny")
+	}
+	if !resumeCalled {
+		t.Error("OnResume should be called even when denied")
+	}
+}
+
+// TestApprovalHook_OnResumeCalledOnTimeout tests that OnResume is called
+// even when the approval times out.
+func TestApprovalHook_OnResumeCalledOnTimeout(t *testing.T) {
+	handler := &mockApprovalHandler{
+		decision: ApprovalApprove,
+		delay: 5 * time.Second, // long delay to trigger timeout
+	}
+	hitl := NewHITLManager(handler, 50*time.Millisecond)
+
+	var suspendCalled, resumeCalled bool
+	hook := NewApprovalHook(hitl, nil, "sub-1", "sess-1", "turn-1")
+	hook.OnSuspend = func() { suspendCalled = true }
+	hook.OnResume = func() { resumeCalled = true }
+
+	call := &toolhook.ToolCall{
+		ID: "tc-1",
+		Name: "slow_tool",
+		Arguments: map[string]any{},
+	}
+
+	result, _ := hook.Before(context.Background(), call)
+	if !result.Block {
+		t.Error("should be blocked for timeout")
+	}
+	if !suspendCalled {
+		t.Error("OnSuspend should be called before requesting approval")
+	}
+	if !resumeCalled {
+		t.Error("OnResume should be called even on timeout")
+	}
+}
+
+// TestApprovalHook_OnSuspendOnResumeOrder tests that OnSuspend is called
+// before the approval request and OnResume is called after.
+func TestApprovalHook_OnSuspendOnResumeOrder(t *testing.T) {
+	var order []string
+	handler := &mockApprovalHandler{decision: ApprovalApprove}
+	hitl := NewHITLManager(handler, 0)
+
+	hook := NewApprovalHook(hitl, nil, "sub-1", "sess-1", "turn-1")
+	hook.OnSuspend = func() { order = append(order, "suspend") }
+	hook.OnResume = func() { order = append(order, "resume") }
+
+	call := &toolhook.ToolCall{
+		ID: "tc-1",
+		Name: "test_tool",
+		Arguments: map[string]any{},
+	}
+
+	_, _ = hook.Before(context.Background(), call)
+
+	if len(order) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(order))
+	}
+	if order[0] != "suspend" {
+		t.Errorf("first call = %q, want %q", order[0], "suspend")
+	}
+	if order[1] != "resume" {
+		t.Errorf("second call = %q, want %q", order[1], "resume")
+	}
+}
+
+// TestApprovalHook_NilCallbacks tests that nil OnSuspend/OnResume are safe.
+func TestApprovalHook_NilCallbacks(t *testing.T) {
+	handler := &mockApprovalHandler{decision: ApprovalApprove}
+	hitl := NewHITLManager(handler, 0)
+
+	hook := NewApprovalHook(hitl, nil, "sub-1", "sess-1", "turn-1")
+	// OnSuspend and OnResume are nil by default
+
+	call := &toolhook.ToolCall{
+		ID: "tc-1",
+		Name: "test_tool",
+		Arguments: map[string]any{},
+	}
+
+	result, err := hook.Before(context.Background(), call)
+	if err != nil {
+		t.Fatalf("Before: %v", err)
+	}
+	if result.Block {
+		t.Errorf("Block = %v, want false (approved)", result.Block)
+	}
+}
