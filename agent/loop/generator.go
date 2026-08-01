@@ -22,6 +22,7 @@ import (
 	"github.com/pengjunchen/go-agent-core/llm/message"
 	"github.com/pengjunchen/go-agent-core/llm/provider"
 	"github.com/pengjunchen/go-agent-core/llm/stream"
+	"github.com/pengjunchen/go-agent-core/production"
 )
 
 // ─── LoopGenerator 接口 ──────────────────────────────────────────
@@ -56,6 +57,7 @@ type TurnParams struct {
 	SteerCh <-chan string
 	Prompt string
 	PrepareNextTurn PrepareNextTurnFunc // 可选，每次 Turn 前回调以动态替换 ModelProvider
+	ProductionBundle *production.ProductionBundle // 可选，nil 表示不启用生产化组件
 }
 
 // TurnResult 描述一次 Turn 的结束状态。
@@ -187,18 +189,43 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 			params.Logger.LogItem(ctx, llmRec)
 		}
 
-		// 调用 LLM（带重试逻辑）
-		streamCh, err := streamChatWithRetry(ctx, activeProvider, params.RetryConfig, msgs, chatOpts)
-		if err != nil {
-			emitEvent(eventCh, event.AgentEvent{
-				Type: event.EventTurnEnd,
-				SubmissionID: params.SubmissionID,
-				TurnID: params.TurnID,
-				SessionID: params.SessionID,
-				Timestamp: time.Now().UnixMilli(),
+		// 调用 LLM（带重试逻辑，可选熔断器保护）
+		var streamCh <-chan stream.StreamEvent
+		if params.ProductionBundle != nil && params.ProductionBundle.CircuitBreaker != nil {
+			cbErr := params.ProductionBundle.CircuitBreaker.Execute(ctx, func(ctx context.Context) error {
+				var chatErr error
+				streamCh, chatErr = streamChatWithRetry(ctx, activeProvider, params.RetryConfig, msgs, chatOpts)
+				return chatErr
 			})
-			emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("stream chat: %w", err))
-			return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+			if cbErr != nil {
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventTurnEnd,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				if errors.Is(cbErr, production.ErrCircuitOpen) {
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("circuit breaker open: %w", cbErr))
+				} else {
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("stream chat: %w", cbErr))
+				}
+				return &TurnResult{Status: event.StatusError, Error: cbErr, TurnCount: turnCount}
+			}
+		} else {
+			var chatErr error
+			streamCh, chatErr = streamChatWithRetry(ctx, activeProvider, params.RetryConfig, msgs, chatOpts)
+			if chatErr != nil {
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventTurnEnd,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("stream chat: %w", chatErr))
+				return &TurnResult{Status: event.StatusError, Error: chatErr, TurnCount: turnCount}
+			}
 		}
 
 		// 处理流式事件
@@ -432,6 +459,81 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				}
 			}
 
+			// 安全守卫校验
+			if params.ProductionBundle != nil && params.ProductionBundle.SecurityGuard != nil {
+				secDecision, secErr := params.ProductionBundle.SecurityGuard.ValidateToolCall(ctx, production.SecurityCallInfo{
+					ToolName: hookCall.Name,
+					Arguments: hookCall.Arguments,
+					SessionID: params.SessionID,
+				})
+				if secErr != nil {
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("security guard error: %w", secErr))
+					emitEvent(eventCh, event.AgentEvent{
+						Type: event.EventToolCallResult,
+						SubmissionID: params.SubmissionID,
+						TurnID: params.TurnID,
+						SessionID: params.SessionID,
+						Payload: &registry.ToolResult{
+							Content: fmt.Sprintf("security validation error: %v", secErr),
+							IsError: true,
+						},
+						Timestamp: time.Now().UnixMilli(),
+					})
+					continue
+				}
+				if !secDecision.Allowed {
+					reason := secDecision.Reason
+					if reason == "" {
+						reason = "blocked by security policy"
+					}
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("tool call blocked by security: %s", reason))
+					emitEvent(eventCh, event.AgentEvent{
+						Type: event.EventToolCallResult,
+						SubmissionID: params.SubmissionID,
+						TurnID: params.TurnID,
+						SessionID: params.SessionID,
+						Payload: &registry.ToolResult{
+							Content: fmt.Sprintf("tool call blocked by security: %s", reason),
+							IsError: true,
+						},
+						Timestamp: time.Now().UnixMilli(),
+					})
+					continue
+				}
+			}
+
+			// 幂等键检查
+			if params.ProductionBundle != nil && params.ProductionBundle.IdempotencyKey != nil {
+				idemKey := fmt.Sprintf("%s:%v", hookCall.Name, hookCall.Arguments)
+				rec, found, idemErr := params.ProductionBundle.IdempotencyKey.Check(ctx, idemKey)
+				if idemErr != nil {
+					slog.Warn("idempotency check failed, proceeding with execution", "error", idemErr)
+				} else if found && rec != nil {
+					// Return cached result
+					cachedResult := &registry.ToolResult{
+						Content: fmt.Sprintf("%v", rec.Result),
+					}
+					emitEvent(eventCh, event.AgentEvent{
+						Type: event.EventToolCallResult,
+						SubmissionID: params.SubmissionID,
+						TurnID: params.TurnID,
+						SessionID: params.SessionID,
+						Payload: cachedResult,
+						Timestamp: time.Now().UnixMilli(),
+					})
+					if err := params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{
+						Role: string(message.RoleTool),
+						Content: cachedResult.Content,
+						ToolCallID: hookCall.ID,
+						ToolName: hookCall.Name,
+						Metadata: map[string]any{"is_error": false, "idempotency_cached": true},
+					}); err != nil {
+						emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record idempotency result: %w", err))
+					}
+					continue
+				}
+			}
+
 			// 执行工具
 			var toolResult *registry.ToolResult
 			toolDef, err := params.ToolRegistry.GetTool(ctx, hookCall.Name)
@@ -550,6 +652,53 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				}
 				params.Logger.LogItem(ctx, rec)
 			}
+
+			// 循环检测
+			if params.ProductionBundle != nil && params.ProductionBundle.LoopDetector != nil {
+				_ = params.ProductionBundle.LoopDetector.Record(ctx, production.ToolCallRecord{ // 循环检测记录失败不影响工具执行
+					ToolName: hookCall.Name,
+					Arguments: hookCall.Arguments,
+					Timestamp: time.Now(),
+				})
+				if params.ProductionBundle.LoopDetector.IsLoop(ctx) {
+					emitEvent(eventCh, event.AgentEvent{
+						Type: event.EventToolLoopDetected,
+						SubmissionID: params.SubmissionID,
+						TurnID: params.TurnID,
+						SessionID: params.SessionID,
+						Payload: hookCall.Name,
+						Timestamp: time.Now().UnixMilli(),
+					})
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("loop detected: tool %q called consecutively", hookCall.Name))
+					emitEvent(eventCh, event.AgentEvent{
+						Type: event.EventTurnEnd,
+						SubmissionID: params.SubmissionID,
+						TurnID: params.TurnID,
+						SessionID: params.SessionID,
+						Timestamp: time.Now().UnixMilli(),
+					})
+					return &TurnResult{Status: event.StatusError, Error: fmt.Errorf("loop detected: tool %q called consecutively", hookCall.Name), TurnCount: turnCount}
+				}
+			}
+
+			// 审计日志
+			if params.ProductionBundle != nil && params.ProductionBundle.AuditLogger != nil {
+				_ = params.ProductionBundle.AuditLogger.LogToolCall(ctx, production.AuditToolCallEvent{ // 审计日志记录失败不影响工具执行
+					Timestamp: time.Now(),
+					SessionID: params.SessionID,
+					ToolName: hookCall.Name,
+					Arguments: hookCall.Arguments,
+					Result: hookResult.Content,
+					Approved: true, // If we got here, the call was approved (not blocked)
+					DecisionBy: "auto",
+				})
+			}
+
+			// 幂等键记录
+			if params.ProductionBundle != nil && params.ProductionBundle.IdempotencyKey != nil {
+				idemKey := fmt.Sprintf("%s:%v", hookCall.Name, hookCall.Arguments)
+				_ = params.ProductionBundle.IdempotencyKey.Record(ctx, idemKey, hookResult.Content) // 幂等记录失败不影响工具执行
+			}
 		}
 
 		if shouldTerminate {
@@ -584,31 +733,6 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 			})
 			return &TurnResult{Status: event.StatusCompleted, TurnCount: turnCount}
 		}
-	}
-
-	// 执行 AfterTurn 中间件
-	if params.MiddlewareChain != nil {
-		if err := params.MiddlewareChain.AfterTurn(ctx, params.TurnID); err != nil {
-			emitEvent(eventCh, event.AgentEvent{
-				Type: event.EventTurnEnd,
-				SubmissionID: params.SubmissionID,
-				TurnID: params.TurnID,
-				SessionID: params.SessionID,
-				Timestamp: time.Now().UnixMilli(),
-			})
-			emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("after turn middleware: %w", err))
-			return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
-		}
-	}
-
-	// 记录 Turn 结束日志
-	if params.Logger != nil {
-		params.Logger.LogTurn(ctx, log.NewTurnRecord("turn_end", params.SessionID, params.TurnID, "completed"))
-	}
-
-	// 记录事件日志
-	if params.Logger != nil {
-		params.Logger.LogEvent(ctx, log.NewEventRecord("completed", params.SessionID, params.TurnID))
 	}
 
 	return &TurnResult{Status: event.StatusCompleted, TurnCount: turnCount}

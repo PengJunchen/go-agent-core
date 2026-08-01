@@ -1113,7 +1113,8 @@ func (m *genBeforeTurnMiddleware) AfterCompact(_ stdcontext.Context) error {
 	return nil
 }
 
-// TestLoopGenerator_MiddlewareAfterTurn 测试 AfterTurn 中间件。
+// TestLoopGenerator_MiddlewareAfterTurn 测试 generator 不调用 AfterTurn 中间件。
+// AfterTurn 由 agent（default.go）负责调用，generator 不应重复调用。
 func TestLoopGenerator_MiddlewareAfterTurn(t *testing.T) {
 	responses := [][]stream.StreamEvent{
 		{
@@ -1129,16 +1130,17 @@ func TestLoopGenerator_MiddlewareAfterTurn(t *testing.T) {
 	chain.Add(mw)
 	params.MiddlewareChain = chain
 
-	result, events := runGeneratorTurn(params)
+	result, _ := runGeneratorTurn(params)
 
-	if result.Status != event.StatusError {
-		t.Errorf("status = %v, want %v", result.Status, event.StatusError)
+	// generator 不调用 AfterTurn，即使中间件会失败也应返回 Completed
+	if result.Status != event.StatusCompleted {
+		t.Errorf("status = %v, want %v", result.Status, event.StatusCompleted)
 	}
-	if result.Error == nil {
-		t.Error("expected error from AfterTurn middleware")
+	if result.Error != nil {
+		t.Errorf("error = %v, want nil", result.Error)
 	}
-	if !genHasEventType(events, event.EventError) {
-		t.Errorf("missing EventError, got %v", genEventTypes(events))
+	if mw.called {
+		t.Error("AfterTurn middleware should not be called by generator")
 	}
 }
 

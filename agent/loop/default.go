@@ -24,6 +24,7 @@ import (
 	"github.com/pengjunchen/go-agent-core/memory/log"
 	"github.com/pengjunchen/go-agent-core/llm/message"
 	"github.com/pengjunchen/go-agent-core/llm/provider"
+	"github.com/pengjunchen/go-agent-core/production"
 )
 
 // ─── 错误定义 ────────────────────────────────────────────────────
@@ -93,6 +94,7 @@ type LoopAgentConfig struct {
 	RetryConfig *RetryConfig // 可选，nil 表示不重试
 	CompactThreshold int // 触发自动压缩的 token 阈值（0 = 禁用）
 	PrepareNextTurn PrepareNextTurnFunc // 可选，nil 表示不启用运行时 Provider 切换
+	ProductionBundle *production.ProductionBundle // 可选，nil 表示不启用生产化组件
 }
 
 // ─── DefaultLoopAgent ────────────────────────────────────────────
@@ -123,6 +125,7 @@ type DefaultLoopAgent struct {
 	retryConfig *RetryConfig
 	compactThreshold int
 	prepareNextTurn PrepareNextTurnFunc
+	productionBundle *production.ProductionBundle
 
 	// 生成器（可替换）
 	generator LoopGenerator
@@ -257,6 +260,7 @@ func (a *DefaultLoopAgent) runLoop(ctx context.Context, input AgentInput, submis
 		SteerCh: a.steerCh,
 		Prompt: input.Prompt,
 		PrepareNextTurn: a.prepareNextTurn,
+		ProductionBundle: a.productionBundle,
 	}
 
 	result := a.generator.RunTurn(ctx, params, eventCh)
@@ -488,6 +492,20 @@ func (a *DefaultLoopAgent) Close() error {
 }
 
 // ─── 内部辅助方法 ──────────────────────────────────────────────────
+
+// TransitionToWaitingApproval transitions from Running to WaitingApproval.
+// This is called by ApprovalHook.OnSuspend callback.
+// If the current status is not Running, the transition is a no-op (logged as invalid).
+func (a *DefaultLoopAgent) TransitionToWaitingApproval() {
+	a.transitionStatus(event.StatusRunning, event.StatusWaitingApproval)
+}
+
+// TransitionToRunning transitions from WaitingApproval back to Running.
+// This is called by ApprovalHook.OnResume callback.
+// If the current status is not WaitingApproval, the transition is a no-op (logged as invalid).
+func (a *DefaultLoopAgent) TransitionToRunning() {
+	a.transitionStatus(event.StatusWaitingApproval, event.StatusRunning)
+}
 
 // transitionStatus 执行状态转换，带校验。
 func (a *DefaultLoopAgent) transitionStatus(from, to event.AgentStatus) {

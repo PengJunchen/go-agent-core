@@ -16,6 +16,7 @@ import (
 	"github.com/pengjunchen/go-agent-core/memory/log"
 	"github.com/pengjunchen/go-agent-core/llm/provider"
 	"github.com/pengjunchen/go-agent-core/memory/session"
+	"github.com/pengjunchen/go-agent-core/production"
 )
 
 // ─── 构造错误 ────────────────────────────────────────────────────
@@ -76,6 +77,7 @@ func NewDefaultLoopAgent(cfg *LoopAgentConfig) (*DefaultLoopAgent, error) {
 		retryConfig: cfg.RetryConfig,
 		compactThreshold: cfg.CompactThreshold,
 		prepareNextTurn: cfg.PrepareNextTurn,
+		productionBundle: cfg.ProductionBundle,
 		generator: NewDefaultLoopGenerator(),
 		status: event.StatusIdle,
 	}
@@ -168,6 +170,12 @@ func (b *LoopAgentBuilder) WithCompactThreshold(threshold int) *LoopAgentBuilder
 // WithPrepareNextTurn 设置运行时 Provider 切换函数。传入 nil 表示不启用。
 func (b *LoopAgentBuilder) WithPrepareNextTurn(fn PrepareNextTurnFunc) *LoopAgentBuilder {
 	b.cfg.PrepareNextTurn = fn
+	return b
+}
+
+// WithProduction 设置生产化组件包。传入 nil 表示不启用。
+func (b *LoopAgentBuilder) WithProduction(pb *production.ProductionBundle) *LoopAgentBuilder {
+	b.cfg.ProductionBundle = pb
 	return b
 }
 
