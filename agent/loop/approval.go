@@ -245,3 +245,8 @@ func (h *ApprovalHook) Before(ctx context.Context, call *toolhook.ToolCall) (*to
 func (h *ApprovalHook) After(_ context.Context, _ *toolhook.ToolCall, _ *toolhook.ToolResult) (*toolhook.AfterResult, error) {
 	return &toolhook.AfterResult{}, nil
 }
+
+// PrepareArguments 实现 ArgumentsPreparer — 审批钩子不修改参数。
+func (h *ApprovalHook) PrepareArguments(_ context.Context, call *toolhook.ToolCall) (*toolhook.ToolCall, error) {
+	return call, nil
+}

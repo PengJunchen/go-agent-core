@@ -757,3 +757,667 @@ func TestDefaultTransformer_NilContentAndToolCalls(t *testing.T) {
 		t.Errorf("expected nil Content for nil input, got %v", out[0].Content)
 	}
 }
+
+// ========== ToolCallIDNormalizer 测试 ==========
+
+// VT-033: ToolCallIDNormalizer 将纯数字 ID 转为 "tc_{n}" 格式。
+func TestToolCallIDNormalizer_NumericID(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: "0", Name: "search"},
+				{ID: "1", Name: "lookup"},
+			},
+		},
+	}
+	out, err := ToolCallIDNormalizer(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("ToolCallIDNormalizer: %v", err)
+	}
+	if out[0].ToolCalls[0].ID != "tc_0" {
+		t.Errorf("ID[0] = %q, want %q", out[0].ToolCalls[0].ID, "tc_0")
+	}
+	if out[0].ToolCalls[1].ID != "tc_1" {
+		t.Errorf("ID[1] = %q, want %q", out[0].ToolCalls[1].ID, "tc_1")
+	}
+}
+
+// VT-034: ToolCallIDNormalizer 保留非数字 ID 不变。
+func TestToolCallIDNormalizer_NonNumericID(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: "call_abc123", Name: "search"},
+			},
+		},
+	}
+	out, err := ToolCallIDNormalizer(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ToolCallIDNormalizer: %v", err)
+	}
+	if out[0].ToolCalls[0].ID != "call_abc123" {
+		t.Errorf("ID = %q, want %q", out[0].ToolCalls[0].ID, "call_abc123")
+	}
+}
+
+// VT-035: ToolCallIDNormalizer 同步映射 Tool 角色消息的 ToolCallID。
+func TestToolCallIDNormalizer_ToolRoleMapping(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: "0", Name: "search"},
+			},
+		},
+		{
+			Role: message.RoleTool,
+			ToolCallID: "0",
+			Content: []message.Content{{Type: message.ContentText, Text: "result"}},
+		},
+	}
+	out, err := ToolCallIDNormalizer(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("ToolCallIDNormalizer: %v", err)
+	}
+	if out[0].ToolCalls[0].ID != "tc_0" {
+		t.Errorf("ToolCall ID = %q, want %q", out[0].ToolCalls[0].ID, "tc_0")
+	}
+	if out[1].ToolCallID != "tc_0" {
+		t.Errorf("ToolCallID = %q, want %q", out[1].ToolCallID, "tc_0")
+	}
+}
+
+// VT-036: ToolCallIDNormalizer 处理 Tool 角色的数字 ToolCallID（无对应 ToolCall）。
+func TestToolCallIDNormalizer_ToolRoleNumericIDNoMatch(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleTool,
+			ToolCallID: "42",
+			Content: []message.Content{{Type: message.ContentText, Text: "result"}},
+		},
+	}
+	out, err := ToolCallIDNormalizer(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ToolCallIDNormalizer: %v", err)
+	}
+	if out[0].ToolCallID != "tc_42" {
+		t.Errorf("ToolCallID = %q, want %q", out[0].ToolCallID, "tc_42")
+	}
+}
+
+// VT-037: ToolCallIDNormalizer 不修改输入。
+func TestToolCallIDNormalizer_DoesNotModifyInput(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: "0", Name: "search"},
+			},
+		},
+	}
+	_, err := ToolCallIDNormalizer(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ToolCallIDNormalizer: %v", err)
+	}
+	if in[0].ToolCalls[0].ID != "0" {
+		t.Errorf("input ID was modified: got %q, want %q", in[0].ToolCalls[0].ID, "0")
+	}
+}
+
+// VT-038: ToolCallIDNormalizer 处理混合 ID 类型。
+func TestToolCallIDNormalizer_MixedIDs(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: "0", Name: "search"},
+				{ID: "call_abc", Name: "lookup"},
+				{ID: "99", Name: "compute"},
+			},
+		},
+	}
+	out, err := ToolCallIDNormalizer(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ToolCallIDNormalizer: %v", err)
+	}
+	if out[0].ToolCalls[0].ID != "tc_0" {
+		t.Errorf("ID[0] = %q, want %q", out[0].ToolCalls[0].ID, "tc_0")
+	}
+	if out[0].ToolCalls[1].ID != "call_abc" {
+		t.Errorf("ID[1] = %q, want %q", out[0].ToolCalls[1].ID, "call_abc")
+	}
+	if out[0].ToolCalls[2].ID != "tc_99" {
+		t.Errorf("ID[2] = %q, want %q", out[0].ToolCalls[2].ID, "tc_99")
+	}
+}
+
+// VT-039: ToolCallIDNormalizer 处理空消息列表。
+func TestToolCallIDNormalizer_EmptyMessages(t *testing.T) {
+	out, err := ToolCallIDNormalizer(context.Background(), []message.Message{}, "openai")
+	if err != nil {
+		t.Fatalf("ToolCallIDNormalizer: %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("output count = %d, want 0", len(out))
+	}
+}
+
+// VT-040: isNumericID 测试。
+func TestIsNumericID(t *testing.T) {
+	tests := []struct {
+		input string
+		want bool
+	}{
+		{"0", true},
+		{"42", true},
+		{"007", true},
+		{"", false},
+		{"abc", false},
+		{"1a", false},
+		{"call_123", false},
+		{"-1", false},
+	}
+	for _, tt := range tests {
+		got := isNumericID(tt.input)
+		if got != tt.want {
+			t.Errorf("isNumericID(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+// ========== ImageFormatAdapter 测试 ==========
+
+// VT-041: ImageFormatAdapter 对不支持图片的 provider 替换图片。
+func TestImageFormatAdapter_NonVisionProvider(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentImage, Image: &message.Image{Data: "abc", MediaType: "image/png"}},
+			},
+		},
+	}
+	out, err := ImageFormatAdapter(context.Background(), in, "text-only")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("content type = %v, want ContentText", out[0].Content[0].Type)
+	}
+	expected := "[Image: image/png, 3 bytes]"
+	if out[0].Content[0].Text != expected {
+		t.Errorf("placeholder = %q, want %q", out[0].Content[0].Text, expected)
+	}
+}
+
+// VT-042: ImageFormatAdapter 对支持图片的 provider 保留合规图片。
+func TestImageFormatAdapter_VisionProviderAllowedType(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentImage, Image: &message.Image{Data: "abc", MediaType: "image/png"}},
+			},
+		},
+	}
+	out, err := ImageFormatAdapter(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentImage {
+		t.Errorf("content type = %v, want ContentImage", out[0].Content[0].Type)
+	}
+}
+
+// VT-043: ImageFormatAdapter 对支持图片的 provider 替换不合规 MIME。
+func TestImageFormatAdapter_VisionProviderUnsupportedType(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentImage, Image: &message.Image{Data: "abc", MediaType: "image/bmp"}},
+			},
+		},
+	}
+	out, err := ImageFormatAdapter(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("content type = %v, want ContentText", out[0].Content[0].Type)
+	}
+	if out[0].Content[0].Text != "[Unsupported image: image/bmp]" {
+		t.Errorf("placeholder = %q, want %q", out[0].Content[0].Text, "[Unsupported image: image/bmp]")
+	}
+}
+
+// VT-044: ImageFormatAdapter 对 Anthropic 保留合规图片。
+func TestImageFormatAdapter_AnthropicAllowedType(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentImage, Image: &message.Image{Data: "abc", MediaType: "image/jpeg"}},
+			},
+		},
+	}
+	out, err := ImageFormatAdapter(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentImage {
+		t.Errorf("content type = %v, want ContentImage", out[0].Content[0].Type)
+	}
+}
+
+// VT-045: ImageFormatAdapter 不修改输入。
+func TestImageFormatAdapter_DoesNotModifyInput(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentImage, Image: &message.Image{Data: "abc", MediaType: "image/png"}},
+			},
+		},
+	}
+	_, err := ImageFormatAdapter(context.Background(), in, "text-only")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter: %v", err)
+	}
+	if in[0].Content[0].Type != message.ContentImage {
+		t.Errorf("input content type was modified")
+	}
+}
+
+// VT-046: ImageFormatAdapter 混合文本和图片内容。
+func TestImageFormatAdapter_MixedContent(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentText, Text: "hello"},
+				{Type: message.ContentImage, Image: &message.Image{Data: "data", MediaType: "image/bmp"}},
+				{Type: message.ContentText, Text: "world"},
+			},
+		},
+	}
+	out, err := ImageFormatAdapter(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter: %v", err)
+	}
+	if out[0].Content[0].Text != "hello" {
+		t.Errorf("first text block = %q, want %q", out[0].Content[0].Text, "hello")
+	}
+	if out[0].Content[1].Type != message.ContentText {
+		t.Errorf("unsupported image not replaced, type = %v", out[0].Content[1].Type)
+	}
+	if out[0].Content[2].Text != "world" {
+		t.Errorf("second text block = %q, want %q", out[0].Content[2].Text, "world")
+	}
+}
+
+// VT-047: isAllowedImageType 测试。
+func TestIsAllowedImageType(t *testing.T) {
+	allowed := []string{"image/png", "image/jpeg", "image/gif", "image/webp"}
+	tests := []struct {
+		mediaType string
+		want bool
+	}{
+		{"image/png", true},
+		{"image/jpeg", true},
+		{"image/bmp", false},
+		{"image/svg+xml", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		got := isAllowedImageType(tt.mediaType, allowed)
+		if got != tt.want {
+			t.Errorf("isAllowedImageType(%q) = %v, want %v", tt.mediaType, got, tt.want)
+		}
+	}
+}
+
+// ========== ThinkingBlockAdapterEnhanced 测试 ==========
+
+// VT-048: ThinkingBlockAdapterEnhanced 对 OpenAI 将思维块转为文本。
+func TestThinkingBlockAdapterEnhanced_OpenAI(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "let me think about this"},
+				{Type: message.ContentText, Text: "here is my answer"},
+			},
+		},
+	}
+	out, err := ThinkingBlockAdapterEnhanced(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ThinkingBlockAdapterEnhanced: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("thinking block type = %v, want ContentText", out[0].Content[0].Type)
+	}
+	if out[0].Content[0].Text != "[Thinking] let me think about this" {
+		t.Errorf("thinking text = %q, want %q", out[0].Content[0].Text, "[Thinking] let me think about this")
+	}
+	if out[0].Content[1].Text != "here is my answer" {
+		t.Errorf("text block = %q, want %q", out[0].Content[1].Text, "here is my answer")
+	}
+}
+
+// VT-049: ThinkingBlockAdapterEnhanced 对 Anthropic 将文本前缀转回思维块。
+func TestThinkingBlockAdapterEnhanced_Anthropic(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentText, Text: "[Thinking] let me think about this"},
+				{Type: message.ContentText, Text: "here is my answer"},
+			},
+		},
+	}
+	out, err := ThinkingBlockAdapterEnhanced(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("ThinkingBlockAdapterEnhanced: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("content type = %v, want ContentThinking", out[0].Content[0].Type)
+	}
+	if out[0].Content[0].Thinking != "let me think about this" {
+		t.Errorf("thinking = %q, want %q", out[0].Content[0].Thinking, "let me think about this")
+	}
+	if out[0].Content[1].Text != "here is my answer" {
+		t.Errorf("text block = %q, want %q", out[0].Content[1].Text, "here is my answer")
+	}
+}
+
+// VT-050: ThinkingBlockAdapterEnhanced 对其他 provider 不做转换。
+func TestThinkingBlockAdapterEnhanced_Passthrough(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "hmm"},
+			},
+		},
+	}
+	out, err := ThinkingBlockAdapterEnhanced(context.Background(), in, "gemini")
+	if err != nil {
+		t.Fatalf("ThinkingBlockAdapterEnhanced: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("thinking block type = %v, want ContentThinking for passthrough", out[0].Content[0].Type)
+	}
+	if out[0].Content[0].Thinking != "hmm" {
+		t.Errorf("thinking = %q, want %q", out[0].Content[0].Thinking, "hmm")
+	}
+}
+
+// VT-051: ThinkingBlockAdapterEnhanced 不修改输入。
+func TestThinkingBlockAdapterEnhanced_DoesNotModifyInput(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "original thought"},
+			},
+		},
+	}
+	_, err := ThinkingBlockAdapterEnhanced(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ThinkingBlockAdapterEnhanced: %v", err)
+	}
+	if in[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("input content type was modified")
+	}
+	if in[0].Content[0].Thinking != "original thought" {
+		t.Errorf("input thinking was modified: %q", in[0].Content[0].Thinking)
+	}
+}
+
+// VT-052: ThinkingBlockAdapterEnhanced Anthropic 不转换非 "[Thinking] " 前缀的文本。
+func TestThinkingBlockAdapterEnhanced_AnthropicNonPrefixedText(t *testing.T) {
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentText, Text: "regular text without prefix"},
+			},
+		},
+	}
+	out, err := ThinkingBlockAdapterEnhanced(context.Background(), in, "anthropic")
+	if err != nil {
+		t.Fatalf("ThinkingBlockAdapterEnhanced: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("non-prefixed text was converted, type = %v", out[0].Content[0].Type)
+	}
+	if out[0].Content[0].Text != "regular text without prefix" {
+		t.Errorf("text = %q, want %q", out[0].Content[0].Text, "regular text without prefix")
+	}
+}
+
+// VT-053: classifyThinkingProvider 测试。
+func TestClassifyThinkingProvider(t *testing.T) {
+	tests := []struct {
+		provider string
+		want thinkingProviderConvention
+	}{
+		{"openai", thinkingOpenAI},
+		{"OpenAI", thinkingOpenAI},
+		{"anthropic", thinkingAnthropic},
+		{"anthropic-v3", thinkingAnthropic},
+		{"gemini", thinkingPassthrough},
+		{"", thinkingPassthrough},
+	}
+	for _, tt := range tests {
+		got := classifyThinkingProvider(tt.provider)
+		if got != tt.want {
+			t.Errorf("classifyThinkingProvider(%q) = %v, want %v", tt.provider, got, tt.want)
+		}
+	}
+}
+
+// ========== SystemMessageAdapter 测试 ==========
+
+// VT-054: SystemMessageAdapter 对支持 system role 的 provider 保留系统消息。
+func TestSystemMessageAdapter_SupportsSystemRole(t *testing.T) {
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, "you are helpful"),
+		message.NewTextMessage(message.RoleUser, "hello"),
+	}
+	out, err := SystemMessageAdapter(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("output count = %d, want 2", len(out))
+	}
+	if out[0].Role != message.RoleSystem {
+		t.Errorf("first message role = %v, want RoleSystem", out[0].Role)
+	}
+	if out[0].Content[0].Text != "you are helpful" {
+		t.Errorf("system text = %q, want %q", out[0].Content[0].Text, "you are helpful")
+	}
+}
+
+// VT-055: SystemMessageAdapter 移除空系统消息（支持 system role 的 provider）。
+func TestSystemMessageAdapter_RemovesEmptySystem(t *testing.T) {
+	in := []message.Message{
+		{Role: message.RoleSystem}, // 空 Content
+		message.NewTextMessage(message.RoleUser, "hello"),
+	}
+	out, err := SystemMessageAdapter(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 1 {
+		t.Errorf("output count = %d, want 1 (empty system removed)", len(out))
+	}
+	if out[0].Role != message.RoleUser {
+		t.Errorf("role = %v, want RoleUser", out[0].Role)
+	}
+}
+
+// VT-056: SystemMessageAdapter 移除仅含空文本的系统消息。
+func TestSystemMessageAdapter_RemovesWhitespaceOnlySystem(t *testing.T) {
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, " "),
+		message.NewTextMessage(message.RoleUser, "hello"),
+	}
+	out, err := SystemMessageAdapter(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 1 {
+		t.Errorf("output count = %d, want 1", len(out))
+	}
+}
+
+// VT-057: SystemMessageAdapter 对 Ollama 将系统消息前置到用户消息。
+func TestSystemMessageAdapter_OllamaMerge(t *testing.T) {
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, "you are helpful"),
+		message.NewTextMessage(message.RoleUser, "hello"),
+	}
+	out, err := SystemMessageAdapter(context.Background(), in, "ollama")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("output count = %d, want 1", len(out))
+	}
+	if out[0].Role != message.RoleUser {
+		t.Errorf("role = %v, want RoleUser", out[0].Role)
+	}
+	if len(out[0].Content) != 2 {
+		t.Fatalf("content count = %d, want 2", len(out[0].Content))
+	}
+	if out[0].Content[0].Text != "you are helpful" {
+		t.Errorf("system text = %q, want %q", out[0].Content[0].Text, "you are helpful")
+	}
+	if out[0].Content[1].Text != "hello" {
+		t.Errorf("user text = %q, want %q", out[0].Content[1].Text, "hello")
+	}
+}
+
+// VT-058: SystemMessageAdapter 对 Groq 将系统消息前置到用户消息。
+func TestSystemMessageAdapter_GroqMerge(t *testing.T) {
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, "be concise"),
+		message.NewTextMessage(message.RoleUser, "explain Go"),
+	}
+	out, err := SystemMessageAdapter(context.Background(), in, "groq")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("output count = %d, want 1", len(out))
+	}
+	if out[0].Content[0].Text != "be concise" {
+		t.Errorf("system text = %q, want %q", out[0].Content[0].Text, "be concise")
+	}
+}
+
+// VT-059: SystemMessageAdapter 无用户消息时系统消息变为用户消息。
+func TestSystemMessageAdapter_NoUserMessage(t *testing.T) {
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, "you are helpful"),
+		message.NewTextMessage(message.RoleAssistant, "hi"),
+	}
+	out, err := SystemMessageAdapter(context.Background(), in, "ollama")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("output count = %d, want 2", len(out))
+	}
+	if out[0].Role != message.RoleUser {
+		t.Errorf("first role = %v, want RoleUser", out[0].Role)
+	}
+	if out[0].Content[0].Text != "you are helpful" {
+		t.Errorf("system text = %q, want %q", out[0].Content[0].Text, "you are helpful")
+	}
+}
+
+// VT-060: SystemMessageAdapter 不修改输入。
+func TestSystemMessageAdapter_DoesNotModifyInput(t *testing.T) {
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, "you are helpful"),
+		message.NewTextMessage(message.RoleUser, "hello"),
+	}
+	_, err := SystemMessageAdapter(context.Background(), in, "ollama")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if in[0].Role != message.RoleSystem {
+		t.Errorf("input system message role was modified")
+	}
+	if len(in) != 2 {
+		t.Errorf("input count changed to %d, want 2", len(in))
+	}
+}
+
+// VT-061: SystemMessageAdapter 多条系统消息合并。
+func TestSystemMessageAdapter_MultipleSystemMessages(t *testing.T) {
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, "rule 1"),
+		message.NewTextMessage(message.RoleSystem, "rule 2"),
+		message.NewTextMessage(message.RoleUser, "hello"),
+	}
+	out, err := SystemMessageAdapter(context.Background(), in, "ollama")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("output count = %d, want 1", len(out))
+	}
+	// 两条系统消息应合并为一个内容块
+	if out[0].Content[0].Text != "rule 1\n\nrule 2" {
+		t.Errorf("merged system text = %q, want %q", out[0].Content[0].Text, "rule 1\n\nrule 2")
+	}
+	if out[0].Content[1].Text != "hello" {
+		t.Errorf("user text = %q, want %q", out[0].Content[1].Text, "hello")
+	}
+}
+
+// VT-062: SystemMessageAdapter 无系统消息时不影响消息列表。
+func TestSystemMessageAdapter_NoSystemMessages(t *testing.T) {
+	in := []message.Message{
+		message.NewTextMessage(message.RoleUser, "hello"),
+		message.NewTextMessage(message.RoleAssistant, "hi"),
+	}
+	out, err := SystemMessageAdapter(context.Background(), in, "ollama")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 2 {
+		t.Errorf("output count = %d, want 2", len(out))
+	}
+}
+
+// VT-063: isEmptyMessage 测试。
+func TestIsEmptyMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg message.Message
+		want bool
+	}{
+		{"nil content", message.Message{Role: message.RoleSystem}, true},
+		{"empty content", message.Message{Role: message.RoleSystem, Content: []message.Content{}}, true},
+		{"empty text", message.Message{Role: message.RoleSystem, Content: []message.Content{{Type: message.ContentText, Text: ""}}}, true},
+		{"whitespace text", message.Message{Role: message.RoleSystem, Content: []message.Content{{Type: message.ContentText, Text: " "}}}, true},
+		{"non-empty text", message.Message{Role: message.RoleSystem, Content: []message.Content{{Type: message.ContentText, Text: "hello"}}}, false},
+		{"with image", message.Message{Role: message.RoleSystem, Content: []message.Content{{Type: message.ContentImage, Image: &message.Image{Data: "a"}}}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isEmptyMessage(tt.msg)
+			if got != tt.want {
+				t.Errorf("isEmptyMessage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

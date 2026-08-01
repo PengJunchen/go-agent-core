@@ -122,6 +122,229 @@ func TestTransformPipeline_AddSteps(t *testing.T) {
 	}
 }
 
+// TestTransformPipeline_BuiltinToolCallIDNormalizer verifies built-in ToolCallIDNormalizer works.
+func TestTransformPipeline_BuiltinToolCallIDNormalizer(t *testing.T) {
+	fn := BuiltinTransforms.ToolCallIDNormalizer
+	in := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{
+				{ID: "0", Name: "search"},
+				{ID: "call_abc", Name: "lookup"},
+			},
+		},
+		{
+			Role: message.RoleTool,
+			ToolCallID: "0",
+			Content: []message.Content{{Type: message.ContentText, Text: "result"}},
+		},
+	}
+	out, err := fn(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ToolCallIDNormalizer: %v", err)
+	}
+	if out[0].ToolCalls[0].ID != "tc_0" {
+		t.Errorf("numeric ID not normalized: %q, want %q", out[0].ToolCalls[0].ID, "tc_0")
+	}
+	if out[0].ToolCalls[1].ID != "call_abc" {
+		t.Errorf("non-numeric ID changed: %q, want %q", out[0].ToolCalls[1].ID, "call_abc")
+	}
+	if out[1].ToolCallID != "tc_0" {
+		t.Errorf("ToolCallID not mapped: %q, want %q", out[1].ToolCallID, "tc_0")
+	}
+	// Original should be unchanged
+	if in[0].ToolCalls[0].ID != "0" {
+		t.Errorf("input was modified by ToolCallIDNormalizer")
+	}
+}
+
+// TestTransformPipeline_BuiltinImageFormatAdapter verifies built-in ImageFormatAdapter works.
+func TestTransformPipeline_BuiltinImageFormatAdapter(t *testing.T) {
+	fn := BuiltinTransforms.ImageFormatAdapter
+	in := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentImage, Image: &message.Image{Data: "abc", MediaType: "image/png"}},
+			},
+		},
+	}
+
+	// Non-vision provider: image replaced
+	out, err := fn(context.Background(), in, "text-only")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("content type for text-only = %v, want ContentText", out[0].Content[0].Type)
+	}
+
+	// Vision provider with allowed type: preserved
+	out2, err := fn(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter for openai: %v", err)
+	}
+	if out2[0].Content[0].Type != message.ContentImage {
+		t.Errorf("content type for openai = %v, want ContentImage", out2[0].Content[0].Type)
+	}
+
+	// Vision provider with unsupported type: replaced
+	inBmp := []message.Message{
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentImage, Image: &message.Image{Data: "abc", MediaType: "image/bmp"}},
+			},
+		},
+	}
+	out3, err := fn(context.Background(), inBmp, "openai")
+	if err != nil {
+		t.Fatalf("ImageFormatAdapter for openai/bmp: %v", err)
+	}
+	if out3[0].Content[0].Type != message.ContentText {
+		t.Errorf("content type for openai/bmp = %v, want ContentText", out3[0].Content[0].Type)
+	}
+}
+
+// TestTransformPipeline_BuiltinThinkingBlockAdapterEnhanced verifies built-in ThinkingBlockAdapterEnhanced works.
+func TestTransformPipeline_BuiltinThinkingBlockAdapterEnhanced(t *testing.T) {
+	fn := BuiltinTransforms.ThinkingBlockAdapterEnhanced
+
+	// OpenAI: thinking → text
+	inThinking := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "hmm"},
+			},
+		},
+	}
+	out, err := fn(context.Background(), inThinking, "openai")
+	if err != nil {
+		t.Fatalf("ThinkingBlockAdapterEnhanced for openai: %v", err)
+	}
+	if out[0].Content[0].Type != message.ContentText {
+		t.Errorf("content type for openai = %v, want ContentText", out[0].Content[0].Type)
+	}
+
+	// Anthropic: text prefix → thinking
+	inPrefixed := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentText, Text: "[Thinking] hmm"},
+			},
+		},
+	}
+	out2, err := fn(context.Background(), inPrefixed, "anthropic")
+	if err != nil {
+		t.Fatalf("ThinkingBlockAdapterEnhanced for anthropic: %v", err)
+	}
+	if out2[0].Content[0].Type != message.ContentThinking {
+		t.Errorf("content type for anthropic = %v, want ContentThinking", out2[0].Content[0].Type)
+	}
+}
+
+// TestTransformPipeline_BuiltinSystemMessageAdapter verifies built-in SystemMessageAdapter works.
+func TestTransformPipeline_BuiltinSystemMessageAdapter(t *testing.T) {
+	fn := BuiltinTransforms.SystemMessageAdapter
+
+	// OpenAI: system message preserved
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, "you are helpful"),
+		message.NewTextMessage(message.RoleUser, "hello"),
+	}
+	out, err := fn(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("output count = %d, want 2", len(out))
+	}
+	if out[0].Role != message.RoleSystem {
+		t.Errorf("first role = %v, want RoleSystem", out[0].Role)
+	}
+
+	// Ollama: system message merged into user
+	out2, err := fn(context.Background(), in, "ollama")
+	if err != nil {
+		t.Fatalf("SystemMessageAdapter for ollama: %v", err)
+	}
+	if len(out2) != 1 {
+		t.Fatalf("output count for ollama = %d, want 1", len(out2))
+	}
+	if out2[0].Role != message.RoleUser {
+		t.Errorf("role for ollama = %v, want RoleUser", out2[0].Role)
+	}
+}
+
+// TestTransformPipeline_AllNewBuiltinTransformsCombined verifies pipeline with all new transforms.
+func TestTransformPipeline_AllNewBuiltinTransformsCombined(t *testing.T) {
+	p := NewTransformPipeline(
+		BuiltinTransforms.ToolCallIDNormalizer,
+		BuiltinTransforms.NormalizeToolCallIDs,
+		BuiltinTransforms.ImageFormatAdapter,
+		BuiltinTransforms.ThinkingBlockAdapterEnhanced,
+		BuiltinTransforms.SystemMessageAdapter,
+	)
+
+	in := []message.Message{
+		message.NewTextMessage(message.RoleSystem, "you are helpful"),
+		{
+			Role: message.RoleUser,
+			Content: []message.Content{
+				{Type: message.ContentImage, Image: &message.Image{Data: "abc", MediaType: "image/bmp"}},
+				{Type: message.ContentText, Text: "hello"},
+			},
+		},
+		{
+			Role: message.RoleAssistant,
+			Content: []message.Content{
+				{Type: message.ContentThinking, Thinking: "hmm"},
+				{Type: message.ContentText, Text: "answer"},
+			},
+			ToolCalls: []message.ToolCall{
+				{ID: "0", Name: "search"},
+			},
+		},
+		{
+			Role: message.RoleTool,
+			ToolCallID: "0",
+			Content: []message.Content{{Type: message.ContentText, Text: "result"}},
+		},
+	}
+
+	out, err := p.Execute(context.Background(), in, "openai")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// System message preserved for OpenAI
+	if out[0].Role != message.RoleSystem {
+		t.Errorf("system role = %v, want RoleSystem", out[0].Role)
+	}
+
+	// Image with unsupported MIME replaced
+	if out[1].Content[0].Type != message.ContentText {
+		t.Errorf("image type = %v, want ContentText (unsupported MIME)", out[1].Content[0].Type)
+	}
+
+	// Thinking converted to text for OpenAI
+	if out[2].Content[0].Type != message.ContentText {
+		t.Errorf("thinking type = %v, want ContentText", out[2].Content[0].Type)
+	}
+
+	// ToolCall ID normalized from numeric
+	if out[2].ToolCalls[0].ID != "tc_0" {
+		t.Errorf("ToolCall ID = %q, want %q", out[2].ToolCalls[0].ID, "tc_0")
+	}
+
+	// Tool role ToolCallID normalized
+	if out[3].ToolCallID != "tc_0" {
+		t.Errorf("ToolCallID = %q, want %q", out[3].ToolCallID, "tc_0")
+	}
+}
+
 // TestTransformPipeline_ConcurrentAccess verifies concurrent Add/Execute is safe.
 func TestTransformPipeline_ConcurrentAccess(t *testing.T) {
 	p := NewTransformPipeline()

@@ -65,10 +65,22 @@ var BuiltinTransforms = struct {
 	ImageDowngrade TransformFunc
 	// ThinkingBlockAdapter adapts thinking blocks for the target provider.
 	ThinkingBlockAdapter TransformFunc
+	// ToolCallIDNormalizer normalizes numeric tool call IDs to string format.
+	ToolCallIDNormalizer TransformFunc
+	// ImageFormatAdapter handles image format differences across providers.
+	ImageFormatAdapter TransformFunc
+	// ThinkingBlockAdapterEnhanced adapts thinking blocks bidirectionally.
+	ThinkingBlockAdapterEnhanced TransformFunc
+	// SystemMessageAdapter normalizes system message handling.
+	SystemMessageAdapter TransformFunc
 }{
 	NormalizeToolCallIDs: normalizeToolCallIDsTransform,
 	ImageDowngrade: imageDowngradeTransform,
 	ThinkingBlockAdapter: thinkingBlockAdapterTransform,
+	ToolCallIDNormalizer: ToolCallIDNormalizer,
+	ImageFormatAdapter: ImageFormatAdapter,
+	ThinkingBlockAdapterEnhanced: ThinkingBlockAdapterEnhanced,
+	SystemMessageAdapter: SystemMessageAdapter,
 }
 
 // normalizeToolCallIDsTransform normalizes tool call IDs for the target provider.
