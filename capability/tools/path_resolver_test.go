@@ -256,9 +256,24 @@ func TestPathResolver_NFDFile_NFCLookup(t *testing.T) {
 	r := NewPathResolver(dir)
 
 	// Create a file with an NFD filename (decomposed form): cafe + combining acute.
-	nfdPath := filepath.Join(dir, "cafe\u0301.txt")
+	nfdName := "cafe\u0301.txt"
+	nfdPath := filepath.Join(dir, nfdName)
 	if err := os.WriteFile(nfdPath, []byte("nfd"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+
+	// Verify the filesystem actually preserved the NFD form.
+	// Some Linux filesystems (e.g. overlayfs in containers) normalize to NFC.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no entries in temp dir")
+	}
+	actualName := entries[0].Name()
+	if actualName != nfdName {
+		t.Skipf("filesystem normalized NFD filename to %q; skipping NFD lookup test", actualName)
 	}
 
 	// Look up with NFC form of the same name: café (é = U+00E9).
