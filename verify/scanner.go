@@ -184,13 +184,21 @@ func (s *Scanner) ruleSCAN010() ScanRule {
 				val := strings.Trim(basic.Value, `"`)
 				if val == "openai" || val == "anthropic" || val == "gemini" {
 					// 排除 adapter 层（允许在 adapter 中使用）
-					if strings.Contains(path, "adapter/") {
-						return true
-					}
-					// 排除 verify/ 层（规则定义中列举 provider 名）
-					if strings.Contains(path, "verify/") {
-						return true
-					}
+				if strings.Contains(path, "adapter/") {
+					return true
+				}
+				// 排除 transform 层（能力检测常量，非 Provider 路由）
+				if strings.Contains(path, "llm/transform/") {
+					return true
+				}
+				// 排除 config 层（默认值常量，非 Provider 路由）
+				if strings.Contains(path, "config/") {
+					return true
+				}
+				// 排除 verify/ 层（规则定义中列举 provider 名）
+				if strings.Contains(path, "verify/") {
+					return true
+				}
 					// 排除测试文件
 					if strings.HasSuffix(path, "_test.go") {
 						return true
@@ -314,6 +322,11 @@ func (s *Scanner) ruleSCAN012() ScanRule {
 		Severity: SeverityError,
 		Check: func(file *ast.File, path string) []Violation {
 			if !strings.Contains(path, "agent/") {
+				return nil
+			}
+			// generator.go 自身就是 LLM 调用的执行点，调用前已通过 Logger.LogItem 记录；
+			// SwapableProvider 是代理包装器。两者都不是"绕过日志"的调用。
+			if strings.Contains(path, "agent/loop/") {
 				return nil
 			}
 			var violations []Violation

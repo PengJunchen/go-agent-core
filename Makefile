@@ -1,4 +1,4 @@
-.PHONY: all build test test-race test-cov test-cov-check test-vrules test-integration test-e2e test-log test-leak scan verify report clean
+.PHONY: all build test test-race test-cov test-cov-check test-vrules test-integration test-e2e test-e2e-verbose test-e2e-scenario test-log test-leak scan verify report clean
 
 # Go parameters
 GOCMD=go
@@ -47,12 +47,32 @@ test-integration:
 
 # E2E tests (needs mock LLM server)
 test-e2e:
-	@echo "Starting Mock LLM Server..."
-	@cd e2e_testing/mock_llm_server && $(GOBUILD) -o /tmp/mock_llm_server . && /tmp/mock_llm_server -port 18099 &
+	@echo "=== Building E2E test components ==="
+	@cd e2e_testing/mock_llm_server && $(GOBUILD) -o /tmp/mock_llm_server_e2e . || (echo "FAIL: mock LLM server build failed"; exit 1)
+	@cd e2e_testing/e2e_runner && $(GOBUILD) -o /tmp/e2e_runner . || (echo "FAIL: e2e runner build failed"; exit 1)
+	@echo "=== Starting Mock LLM Server ==="
+	@/tmp/mock_llm_server_e2e -port 18099 -config $(CURDIR)/e2e_testing/mock_llm_server/scenarios.json &
 	@sleep 1
-	@cd e2e_testing/e2e_runner && $(GOTEST) -race -count=1 -timeout 120s . -run TestE2E || true
-	@pkill -f mock_llm_server || true
-	@echo "E2E tests complete"
+	@echo "=== Running E2E scenarios (S-01 through S-15) ==="
+	@cd e2e_testing/e2e_runner && /tmp/e2e_runner run -llm-port 18099 -timeout 30s || (pkill -f mock_llm_server_e2e || true; echo "FAIL: E2E tests failed"; exit 1)
+	@pkill -f mock_llm_server_e2e || true
+	@echo "=== E2E tests complete ==="
+
+# E2E tests with verbose output
+test-e2e-verbose:
+	@cd e2e_testing/mock_llm_server && $(GOBUILD) -o /tmp/mock_llm_server_e2e .
+	@cd e2e_testing/e2e_runner && $(GOBUILD) -o /tmp/e2e_runner .
+	@/tmp/mock_llm_server_e2e -port 18099 -config $(CURDIR)/e2e_testing/mock_llm_server/scenarios.json -verbose &
+	@sleep 1
+	@cd e2e_testing/e2e_runner && /tmp/e2e_runner run -llm-port 18099 -timeout 30s -verbose; EXIT=$$?; pkill -f mock_llm_server_e2e || true; exit $$EXIT
+
+# E2E test for a single scenario (usage: make test-e2e-scenario SCENARIO=S-01)
+test-e2e-scenario:
+	@cd e2e_testing/mock_llm_server && $(GOBUILD) -o /tmp/mock_llm_server_e2e .
+	@cd e2e_testing/e2e_runner && $(GOBUILD) -o /tmp/e2e_runner .
+	@/tmp/mock_llm_server_e2e -port 18099 -config $(CURDIR)/e2e_testing/mock_llm_server/scenarios.json &
+	@sleep 1
+	@cd e2e_testing/e2e_runner && /tmp/e2e_runner run -llm-port 18099 -timeout 30s -scenario $(SCENARIO) -verbose; EXIT=$$?; pkill -f mock_llm_server_e2e || true; exit $$EXIT
 
 # Log integrity tests
 test-log:
@@ -64,19 +84,20 @@ test-leak:
 
 # AST scanning
 scan:
-	cd verify/cmd/scanner && $(GOCMD) run . -dir .. -format text || true
+	cd verify/cmd/scanner && $(GOCMD) run . -dir .. -format text
 
 # Full verification pipeline
-verify: build test-race test-log test-leak test-vrules
+verify: build test-race test-log test-leak test-vrules scan test-e2e
 	@echo "=== Verification complete ==="
 
 # Generate reports
 report:
-	cd verify/cmd/scanner && $(GOCMD) run . -dir .. -format json > ../verify-scan.json || true
-	$(GOTEST) -json -race -count=1 ./... > verify-test.json 2>/dev/null || true
+	cd verify/cmd/scanner && $(GOCMD) run . -dir .. -format json > ../verify-scan.json
+	$(GOTEST) -json -race -count=1 ./... > verify-test.json 2>/dev/null
 	@echo "Reports generated: verify-scan.json, verify-test.json"
 
 # Clean
 clean:
 	rm -f coverage.out verify-scan.json verify-test.json
+	pkill -f mock_llm_server_e2e || true
 	pkill -f mock_llm_server || true
