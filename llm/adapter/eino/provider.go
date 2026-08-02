@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/eino-contrib/jsonschema"
 
 	"github.com/pengjunchen/go-agent-core/llm/message"
 	"github.com/pengjunchen/go-agent-core/llm/provider"
@@ -35,9 +36,9 @@ func NewEinoProvider(chatModel model.BaseChatModel, providerName, modelName stri
 	return &EinoProvider{
 		chatModel: chatModel,
 		modelInfo: &provider.ModelInfo{
-			Provider: providerName,
-			ModelName: modelName,
-			MaxTokens: maxTokens,
+			Provider:          providerName,
+			ModelName:         modelName,
+			MaxTokens:         maxTokens,
 			SupportsStreaming: true,
 		},
 	}
@@ -114,8 +115,8 @@ func emitPendingToolCalls(ch chan<- stream.StreamEvent, toolCalls []schema.ToolC
 		ch <- stream.StreamEvent{
 			Type: stream.StreamToolCallStart,
 			ToolCall: &stream.ToolCall{
-				ID: tc.ID,
-				Name: tc.Function.Name,
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
 				Arguments: args,
 			},
 		}
@@ -126,27 +127,38 @@ func emitPendingToolCalls(ch chan<- stream.StreamEvent, toolCalls []schema.ToolC
 //
 // OpenAI 流式协议中，tool call 的 arguments 是分段传输的：
 //
-//	chunk 1: ToolCalls[0] = {ID:"call_1", Function:{Name:"read_file", Arguments:"{\"pa"}}
-//	chunk 2: ToolCalls[0] = {ID:"call_1", Function:{Name:"", Arguments:"th\":"}}
-//	chunk 3: ToolCalls[0] = {ID:"call_1", Function:{Name:"", Arguments:"\"/tmp\"}"}}
+//	chunk 1: ToolCalls[0] = {Index:0, ID:"call_1", Function:{Name:"read_file", Arguments:"{\"pa"}}
+//	chunk 2: ToolCalls[0] = {Index:0, ID:"", Function:{Name:"", Arguments:"th\":"}}
+//	chunk 3: ToolCalls[0] = {Index:0, ID:"", Function:{Name:"", Arguments:"\"/tmp\"}"}}
 //
-// 合并策略：按 ID 匹配，Arguments 字符串追加，Name 取首次非空值。
+// 合并策略：按 Index 匹配（ID 在后续 chunk 中为空），Arguments 字符串追加，Name 取首次非空值。
 func mergeToolCalls(existing []schema.ToolCall, incoming []schema.ToolCall) []schema.ToolCall {
 	for _, inc := range incoming {
-		if inc.ID == "" {
-			continue
-		}
 		found := false
-		for i := range existing {
-			if existing[i].ID == inc.ID {
-				// 合并：追加 arguments
-				existing[i].Function.Arguments += inc.Function.Arguments
-				// Name：取首次非空值
-				if existing[i].Function.Name == "" && inc.Function.Name != "" {
-					existing[i].Function.Name = inc.Function.Name
+		// 优先按 ID 匹配（首个 chunk 有 ID）
+		if inc.ID != "" {
+			for i := range existing {
+				if existing[i].ID == inc.ID {
+					existing[i].Function.Arguments += inc.Function.Arguments
+					if existing[i].Function.Name == "" && inc.Function.Name != "" {
+						existing[i].Function.Name = inc.Function.Name
+					}
+					found = true
+					break
 				}
-				found = true
-				break
+			}
+		}
+		// ID 为空时按 Index 匹配（后续 chunk 只有 Index）
+		if !found && inc.ID == "" {
+			for i := range existing {
+				if existing[i].Index != nil && inc.Index != nil && *existing[i].Index == *inc.Index {
+					existing[i].Function.Arguments += inc.Function.Arguments
+					if existing[i].Function.Name == "" && inc.Function.Name != "" {
+						existing[i].Function.Name = inc.Function.Name
+					}
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
@@ -165,7 +177,7 @@ func emitTextAndThinking(ch chan<- stream.StreamEvent, msg *schema.Message) {
 	// 1. 文本增量
 	if msg.Content != "" {
 		ch <- stream.StreamEvent{
-			Type: stream.StreamTextDelta,
+			Type:    stream.StreamTextDelta,
 			Content: msg.Content,
 		}
 	}
@@ -173,7 +185,7 @@ func emitTextAndThinking(ch chan<- stream.StreamEvent, msg *schema.Message) {
 	// 2. 思维增量
 	if msg.ReasoningContent != "" {
 		ch <- stream.StreamEvent{
-			Type: stream.StreamThinkingDelta,
+			Type:     stream.StreamThinkingDelta,
 			Thinking: msg.ReasoningContent,
 		}
 	}
@@ -184,14 +196,14 @@ func emitTextAndThinking(ch chan<- stream.StreamEvent, msg *schema.Message) {
 		case schema.ChatMessagePartTypeText:
 			if part.Text != "" {
 				ch <- stream.StreamEvent{
-					Type: stream.StreamTextDelta,
+					Type:    stream.StreamTextDelta,
 					Content: part.Text,
 				}
 			}
 		case schema.ChatMessagePartTypeReasoning:
 			if part.Reasoning != nil && part.Reasoning.Text != "" {
 				ch <- stream.StreamEvent{
-					Type: stream.StreamThinkingDelta,
+					Type:     stream.StreamThinkingDelta,
 					Thinking: part.Reasoning.Text,
 				}
 			}
@@ -280,7 +292,7 @@ func toResponseFormatOption(rf *provider.ResponseFormat) model.Option {
 			name = n
 		}
 		rfMap["json_schema"] = map[string]any{
-			"name": name,
+			"name":   name,
 			"schema": rf.JSONSchema,
 			"strict": true,
 		}
@@ -313,6 +325,10 @@ func toThinkingModeOption(tc *provider.ThinkingConfig) model.Option {
 }
 
 // toEinoToolInfos 将 []provider.ToolSpec 转换为 []*schema.ToolInfo。
+//
+// ToolSpec.Parameters 是完整的 JSON Schema（含 type/properties/required），
+// 通过 json.Marshal → jsonschema.Schema 解析后使用
+// NewParamsOneOfByJSONSchema 传入，保留所有参数信息（描述、required、嵌套等）。
 func toEinoToolInfos(tools []provider.ToolSpec) []*schema.ToolInfo {
 	infos := make([]*schema.ToolInfo, 0, len(tools))
 	for _, t := range tools {
@@ -320,44 +336,28 @@ func toEinoToolInfos(tools []provider.ToolSpec) []*schema.ToolInfo {
 			Name: t.Name,
 			Desc: t.Description,
 		}
-		// 如果提供了参数，构造简化的 ParameterInfo
 		if len(t.Parameters) > 0 {
-			params := make(map[string]*schema.ParameterInfo)
-			for k, v := range t.Parameters {
-				paramType := inferDataType(v)
-				params[k] = &schema.ParameterInfo{
-					Type: paramType,
-					Desc: "",
-				}
+			js, err := parametersToJSONSchema(t.Parameters)
+			if err == nil && js != nil {
+				ti.ParamsOneOf = schema.NewParamsOneOfByJSONSchema(js)
 			}
-			ti.ParamsOneOf = schema.NewParamsOneOfByParams(params)
 		}
 		infos = append(infos, ti)
 	}
 	return infos
 }
 
-// inferDataType 从 Go 值推断 schema.DataType。
-func inferDataType(v any) schema.DataType {
-	if v == nil {
-		return schema.String
+// parametersToJSONSchema 将 map[string]any（JSON Schema）转换为 *jsonschema.Schema。
+func parametersToJSONSchema(params map[string]any) (*jsonschema.Schema, error) {
+	data, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("marshal parameters: %w", err)
 	}
-	switch v.(type) {
-	case string:
-		return schema.String
-	case float64, float32:
-		return schema.Number
-	case int, int32, int64:
-		return schema.Integer
-	case bool:
-		return schema.Boolean
-	case []any:
-		return schema.Array
-	case map[string]any:
-		return schema.Object
-	default:
-		return schema.String
+	var js jsonschema.Schema
+	if err := json.Unmarshal(data, &js); err != nil {
+		return nil, fmt.Errorf("unmarshal json schema: %w", err)
 	}
+	return &js, nil
 }
 
 // toEinoToolChoice 将 *provider.ToolChoiceConfig 转换为 schema.ToolChoice。
@@ -384,7 +384,7 @@ func emitEvents(ch chan<- stream.StreamEvent, msg *schema.Message) {
 	// 1. 文本增量 (Content 字段)
 	if msg.Content != "" {
 		ch <- stream.StreamEvent{
-			Type: stream.StreamTextDelta,
+			Type:    stream.StreamTextDelta,
 			Content: msg.Content,
 		}
 	}
@@ -392,7 +392,7 @@ func emitEvents(ch chan<- stream.StreamEvent, msg *schema.Message) {
 	// 2. 思维增量
 	if msg.ReasoningContent != "" {
 		ch <- stream.StreamEvent{
-			Type: stream.StreamThinkingDelta,
+			Type:     stream.StreamThinkingDelta,
 			Thinking: msg.ReasoningContent,
 		}
 	}
@@ -403,14 +403,14 @@ func emitEvents(ch chan<- stream.StreamEvent, msg *schema.Message) {
 		case schema.ChatMessagePartTypeText:
 			if part.Text != "" {
 				ch <- stream.StreamEvent{
-					Type: stream.StreamTextDelta,
+					Type:    stream.StreamTextDelta,
 					Content: part.Text,
 				}
 			}
 		case schema.ChatMessagePartTypeReasoning:
 			if part.Reasoning != nil && part.Reasoning.Text != "" {
 				ch <- stream.StreamEvent{
-					Type: stream.StreamThinkingDelta,
+					Type:     stream.StreamThinkingDelta,
 					Thinking: part.Reasoning.Text,
 				}
 			}
@@ -426,8 +426,8 @@ func emitEvents(ch chan<- stream.StreamEvent, msg *schema.Message) {
 		ch <- stream.StreamEvent{
 			Type: stream.StreamToolCallStart,
 			ToolCall: &stream.ToolCall{
-				ID: tc.ID,
-				Name: tc.Function.Name,
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
 				Arguments: args,
 			},
 		}
@@ -441,7 +441,7 @@ func emitEvents(ch chan<- stream.StreamEvent, msg *schema.Message) {
 // EinoAgenticProvider 适配 Eino 的 AgenticModel（如 Anthropic Claude）到 ModelProvider 接口。
 type EinoAgenticProvider struct {
 	agenticModel model.AgenticModel
-	modelInfo *provider.ModelInfo
+	modelInfo    *provider.ModelInfo
 }
 
 // NewEinoAgenticProvider 创建 EinoAgenticProvider 实例。
@@ -449,9 +449,9 @@ func NewEinoAgenticProvider(agenticModel model.AgenticModel, providerName, model
 	return &EinoAgenticProvider{
 		agenticModel: agenticModel,
 		modelInfo: &provider.ModelInfo{
-			Provider: providerName,
-			ModelName: modelName,
-			MaxTokens: maxTokens,
+			Provider:          providerName,
+			ModelName:         modelName,
+			MaxTokens:         maxTokens,
 			SupportsStreaming: true,
 		},
 	}
@@ -537,15 +537,15 @@ func toAgenticMessage(m message.Message) *schema.AgenticMessage {
 		blocks = append(blocks, &schema.ContentBlock{
 			Type: schema.ContentBlockTypeFunctionToolCall,
 			FunctionToolCall: &schema.FunctionToolCall{
-				CallID: tc.ID,
-				Name: tc.Name,
+				CallID:    tc.ID,
+				Name:      tc.Name,
 				Arguments: marshalJSONArgs(tc.Arguments),
 			},
 		})
 	}
 
 	return &schema.AgenticMessage{
-		Role: role,
+		Role:          role,
 		ContentBlocks: blocks,
 	}
 }
@@ -575,7 +575,7 @@ func fromAgenticMessage(m *schema.AgenticMessage) *message.Message {
 		case schema.ContentBlockTypeReasoning:
 			if block.Reasoning != nil && block.Reasoning.Text != "" {
 				out.Content = append(out.Content, message.Content{
-					Type: message.ContentThinking,
+					Type:     message.ContentThinking,
 					Thinking: block.Reasoning.Text,
 				})
 			}
@@ -587,8 +587,8 @@ func fromAgenticMessage(m *schema.AgenticMessage) *message.Message {
 					_ = json.Unmarshal([]byte(fc.Arguments), &args) // tool call args 容错解析 // tool call args 容错解析
 				}
 				out.ToolCalls = append(out.ToolCalls, message.ToolCall{
-					ID: fc.CallID,
-					Name: fc.Name,
+					ID:        fc.CallID,
+					Name:      fc.Name,
 					Arguments: args,
 				})
 			}
@@ -642,8 +642,8 @@ func pumpAgenticStream(reader *schema.StreamReader[*schema.AgenticMessage]) <-ch
 
 // agenticToolCallAccum 累积 Agentic 模式的 tool call。
 type agenticToolCallAccum struct {
-	CallID string
-	Name string
+	CallID    string
+	Name      string
 	Arguments string // 累积的原始 JSON 字符串
 }
 
@@ -662,8 +662,8 @@ func mergeAgenticToolCall(existing []agenticToolCallAccum, fc *schema.FunctionTo
 		}
 	}
 	return append(existing, agenticToolCallAccum{
-		CallID: fc.CallID,
-		Name: fc.Name,
+		CallID:    fc.CallID,
+		Name:      fc.Name,
 		Arguments: fc.Arguments,
 	})
 }
@@ -678,8 +678,8 @@ func emitPendingAgenticToolCalls(ch chan<- stream.StreamEvent, toolCalls []agent
 		ch <- stream.StreamEvent{
 			Type: stream.StreamToolCallStart,
 			ToolCall: &stream.ToolCall{
-				ID: tc.CallID,
-				Name: tc.Name,
+				ID:        tc.CallID,
+				Name:      tc.Name,
 				Arguments: args,
 			},
 		}
@@ -699,14 +699,14 @@ func emitAgenticTextAndThinking(ch chan<- stream.StreamEvent, msg *schema.Agenti
 		case schema.ContentBlockTypeAssistantGenText:
 			if block.AssistantGenText != nil && block.AssistantGenText.Text != "" {
 				ch <- stream.StreamEvent{
-					Type: stream.StreamTextDelta,
+					Type:    stream.StreamTextDelta,
 					Content: block.AssistantGenText.Text,
 				}
 			}
 		case schema.ContentBlockTypeReasoning:
 			if block.Reasoning != nil && block.Reasoning.Text != "" {
 				ch <- stream.StreamEvent{
-					Type: stream.StreamThinkingDelta,
+					Type:     stream.StreamThinkingDelta,
 					Thinking: block.Reasoning.Text,
 				}
 			}
@@ -728,14 +728,14 @@ func emitAgenticEvents(ch chan<- stream.StreamEvent, msg *schema.AgenticMessage)
 		case schema.ContentBlockTypeAssistantGenText:
 			if block.AssistantGenText != nil && block.AssistantGenText.Text != "" {
 				ch <- stream.StreamEvent{
-					Type: stream.StreamTextDelta,
+					Type:    stream.StreamTextDelta,
 					Content: block.AssistantGenText.Text,
 				}
 			}
 		case schema.ContentBlockTypeReasoning:
 			if block.Reasoning != nil && block.Reasoning.Text != "" {
 				ch <- stream.StreamEvent{
-					Type: stream.StreamThinkingDelta,
+					Type:     stream.StreamThinkingDelta,
 					Thinking: block.Reasoning.Text,
 				}
 			}
@@ -749,8 +749,8 @@ func emitAgenticEvents(ch chan<- stream.StreamEvent, msg *schema.AgenticMessage)
 				ch <- stream.StreamEvent{
 					Type: stream.StreamToolCallStart,
 					ToolCall: &stream.ToolCall{
-						ID: fc.CallID,
-						Name: fc.Name,
+						ID:        fc.CallID,
+						Name:      fc.Name,
 						Arguments: args,
 					},
 				}

@@ -278,8 +278,19 @@ func TestToEinoToolInfos_WithParams(t *testing.T) {
 			Name: "get_weather",
 			Description: "Get current weather",
 			Parameters: map[string]any{
-				"location": "string",
-				"unit": "string",
+				"type": "object",
+				"properties": map[string]any{
+					"location": map[string]any{
+						"type":        "string",
+						"description": "City name",
+					},
+					"unit": map[string]any{
+						"type":        "string",
+						"description": "Temperature unit",
+						"enum":        []any{"celsius", "fahrenheit"},
+					},
+				},
+				"required": []any{"location"},
 			},
 		},
 	}
@@ -289,6 +300,33 @@ func TestToEinoToolInfos_WithParams(t *testing.T) {
 	}
 	if result[0].Name != "get_weather" {
 		t.Errorf("Name = %q, want %q", result[0].Name, "get_weather")
+	}
+	if result[0].ParamsOneOf == nil {
+		t.Fatal("ParamsOneOf should not be nil")
+	}
+	// Verify the JSON Schema is preserved correctly
+	js, err := result[0].ParamsOneOf.ToJSONSchema()
+	if err != nil {
+		t.Fatalf("ToJSONSchema error: %v", err)
+	}
+	if js.Type != "object" {
+		t.Errorf("schema type = %q, want %q", js.Type, "object")
+	}
+	if _, ok := js.Properties.Get("location"); !ok {
+		t.Error("missing 'location' property in schema")
+	}
+	if _, ok := js.Properties.Get("unit"); !ok {
+		t.Error("missing 'unit' property in schema")
+	}
+	// Verify required field is preserved
+	foundRequired := false
+	for _, r := range js.Required {
+		if r == "location" {
+			foundRequired = true
+		}
+	}
+	if !foundRequired {
+		t.Error("'location' should be in required list")
 	}
 }
 
