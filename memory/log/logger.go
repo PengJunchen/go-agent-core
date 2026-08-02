@@ -4,7 +4,7 @@
 // JSONL 文件，不可关闭。所有执行动作（LLM 调用、工具执行、会话变更、
 // 上下文压缩、HITL 审批）都通过 ExecLogger 记录。
 //
-// 日志按三轨落盘（）：
+// 日志按三轨落盘：
 // - sessions/*.jsonl — 会话树（可分支，compaction 检查点）
 // - runs/*.jsonl — turn/item 级执行轨迹（推理/工具调用/中断/Steer）
 // - events/*.jsonl — 事件流原样（含 thinking_delta/text_delta/tool delta）

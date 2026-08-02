@@ -1,8 +1,7 @@
 // Package mcp 定义 MCP（Model Context Protocol）工具发现与调用代理抽象。
 //
 // MCPProvider 负责连接 MCP server、发现工具、执行远程调用。
-// 默认实现 DefaultMCPProvider 支持社区 SDK + 官方 SDK 双轨，
-// 并支持热重载。
+// 默认实现 DefaultMCPProvider 支持社区 SDK + 官方 SDK 双轨，并支持热重载。
 //
 // MCPBroker：包含 Call 方法用于远程工具调用。
 package mcp

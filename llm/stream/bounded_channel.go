@@ -1,6 +1,6 @@
 // Package stream 的 BoundedEventChannel 实现。
 //
-// 带背压控制的事件流通道， + 参考文档。
+// 带背压控制的事件流通道。
 // 解决 UnboundedEventChannel 无背压风险：
 // - maxSize: 通道最大容量
 // - DropPolicy: 满时的处理策略（DropOldest/DropNewest/BlockUntilConsumed）

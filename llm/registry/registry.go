@@ -2,7 +2,6 @@
 //
 // ProviderRegistry 替代硬编码 if-else 路由：Provider 通过
 // init() 自注册，第三方通过空白导入即可扩展，无需修改核心代码。
-// 设计 registry.go 全局注册表。
 package registry
 
 import (

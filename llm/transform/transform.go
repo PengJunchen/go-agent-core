@@ -2,7 +2,7 @@
 //
 // MessageTransformer 在调用 LLM 前应用转换，解决跨模型兼容性问题：
 // ToolCallId 归一化（Anthropic 64 字符限制）、图片降级、思维块适配。
-// 默认实现 DefaultTransformer transformMessages。
+// 默认实现 DefaultTransformer。
 package transform
 
 import (
@@ -304,6 +304,7 @@ func isNumericID(s string) bool {
 // ─── Provider 名称常量 ─────────────────────────────────────────────
 // 这些常量用于 transform 层的 provider 能力检测，不是 Provider 路由。
 // Provider 路由必须通过 ProviderRegistry（SCAN-010）。
+
 const (
 	ProviderNameOpenAI = "openai"
 	ProviderNameAnthropic = "anthropic"

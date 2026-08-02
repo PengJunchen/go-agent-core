@@ -1,6 +1,6 @@
 // Package log 的 JSONL ExecLogger 默认实现（三轨）。
 //
-// 三轨文件布局（）：
+// 三轨文件布局：
 //
 //	<dataDir>/
 //	 ├── sessions/<ts>_<uuid>.jsonl 会话树（可分支，compaction 检查点）

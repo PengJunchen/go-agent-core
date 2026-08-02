@@ -4,10 +4,6 @@
 // 1. Default coding instructions (base layer)
 // 2. AGENTS.md content (project-specific instructions, if present)
 // 3. Environment awareness (cwd, git branch, OS, time)
-//
-// This aligns with go-agent's TemplatedPromptLoader and trae-cli's
-// InstructionBuilder patterns, adapted to go-agent-core's interface-first
-// architecture.
 package prompt
 
 import (

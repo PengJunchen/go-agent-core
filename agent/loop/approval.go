@@ -5,7 +5,6 @@
 // - ApprovalHook 集成 ToolHook 管道，在工具执行前请求审批
 // - ApprovalHandler/ApprovalHandlerFunc 定义审批处理接口
 //
-//
 // 审批决策链：缓存查找 → ApprovalHandler 请求 → 缓存写入。
 package loop
 

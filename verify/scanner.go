@@ -1,6 +1,6 @@
 // Package verify 提供代码校验框架（AST 扫描 + 日志验证 + 泄漏检测）。
 //
-// 沿用校验范式，新增 go-agent-core 专属规则：
+// 沿用校验范式，新增专属规则：
 // - IFACE-001: llm/provider, memory/*, capability/* 不得 import llm/adapter/
 // - IFACE-002: 接口层不得 import cloudwego/eino
 // - IFACE-003: agent/ 不得 import llm/adapter/
@@ -184,21 +184,21 @@ func (s *Scanner) ruleSCAN010() ScanRule {
 				val := strings.Trim(basic.Value, `"`)
 				if val == "openai" || val == "anthropic" || val == "gemini" {
 					// 排除 adapter 层（允许在 adapter 中使用）
-				if strings.Contains(path, "adapter/") {
-					return true
-				}
-				// 排除 transform 层（能力检测常量，非 Provider 路由）
-				if strings.Contains(path, "llm/transform/") {
-					return true
-				}
-				// 排除 config 层（默认值常量，非 Provider 路由）
-				if strings.Contains(path, "config/") {
-					return true
-				}
-				// 排除 verify/ 层（规则定义中列举 provider 名）
-				if strings.Contains(path, "verify/") {
-					return true
-				}
+					if strings.Contains(path, "adapter/") {
+						return true
+					}
+					// 排除 transform 层（能力检测常量，非 Provider 路由）
+					if strings.Contains(path, "llm/transform/") {
+						return true
+					}
+					// 排除 config 层（默认值常量，非 Provider 路由）
+					if strings.Contains(path, "config/") {
+						return true
+					}
+					// 排除 verify/ 层（规则定义中列举 provider 名）
+					if strings.Contains(path, "verify/") {
+						return true
+					}
 					// 排除测试文件
 					if strings.HasSuffix(path, "_test.go") {
 						return true
@@ -264,6 +264,7 @@ func FormatViolations(violations []Violation) string {
 // ─── SCAN-011: 工具事件泄露检测 ──────────────────────────────────
 //
 // 工具执行结果必须通过 ToolHook 管道发射事件，不得直接写 EventStream。
+
 func (s *Scanner) ruleSCAN011() ScanRule {
 	return ScanRule{
 		ID: "SCAN-011",
@@ -316,6 +317,7 @@ func (s *Scanner) ruleSCAN011() ScanRule {
 // ─── SCAN-012: 日志绕过检测 ─────────────────────────────────────────
 //
 // LLM 调用和工具调用必须经过 ExecLogger。
+
 func (s *Scanner) ruleSCAN012() ScanRule {
 	return ScanRule{
 		ID: "SCAN-012",
@@ -361,6 +363,7 @@ func (s *Scanner) ruleSCAN012() ScanRule {
 // ─── SCAN-013: 接口实现完整性检测 ───────────────────────────────────
 //
 // 声明的接口必须有测试覆盖。
+
 func (s *Scanner) ruleSCAN013() ScanRule {
 	return ScanRule{
 		ID: "SCAN-013",

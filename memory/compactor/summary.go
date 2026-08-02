@@ -2,8 +2,7 @@
 //
 // SummaryCompactor 通过 ModelProvider 接口调用 LLM 生成对话历史的
 // 结构化摘要，在保留关键上下文（文件操作、决策、最近轮次）的同时
-// 大幅减少 token 数量。这是 go-agent-core
-// 核心能力，也是。
+// 大幅减少 token 数量。
 package compactor
 
 import (

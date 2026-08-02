@@ -1,6 +1,6 @@
 // Package session 定义会话管理抽象。
 //
-// 会话管理分为两个独立接口（ ADR-4）：
+// 会话管理分为两个独立接口：
 //
 // - SessionManager 管理活跃会话的 CRUD（热路径，影响 Agent 运行时）
 // - SessionSink 管理会话树的持久化与重建（冷路径，影响审计与恢复）

@@ -1,6 +1,6 @@
 // Package event 定义 Agent 事件系统。
 //
-// AgentEvent 是 Agent 引擎对外发射的事件，事件类型：
+// AgentEvent 是 Agent 引擎对外发射的事件：
 // Turn 开始/结束、文本增量、思维增量、工具调用开始/结果、完成、错误等。
 // 事件通过 EventStream 流式推送，带背压控制。
 package event

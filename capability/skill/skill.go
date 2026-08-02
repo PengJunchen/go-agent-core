@@ -1,7 +1,7 @@
 // Package skill 定义 Skill 能力供给抽象。
 //
 // SkillProvider 加载 SKILL.md 文件并注入到 system prompt，
-// 扩展 Agent 的指令能力。设计 Skill 机制。
+// 扩展 Agent 的指令能力。
 package skill
 
 import "context"

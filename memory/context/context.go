@@ -2,7 +2,6 @@
 //
 // ContextManager 管理 Agent 的对话历史与上下文压缩。它记录每个 TurnItem，
 // 在推理前提供标准化历史，并在 token 超限时触发压缩。
-// 设计 ContextManager + Compactor。
 //
 // 此包包含核心接口（ContextManager、Compactor、TokenEstimator）和共享类型
 // （TurnItem、CompactResult）。默认实现位于 memory/context/heuristic.go
@@ -59,7 +58,7 @@ type CompactResult struct {
 
 // TurnItem 是上下文中的一个条目（消息/工具调用/工具结果等）。
 //
-// TurnItem 是上下文管理的通用货币， TurnItem。
+// TurnItem 是上下文管理的通用货币。
 type TurnItem struct {
 	Role string
 	Content string

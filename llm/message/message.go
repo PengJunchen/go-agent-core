@@ -2,7 +2,7 @@
 //
 // 这些类型是 L4 协议层的通用货币：ModelProvider 接收 []Message、
 // 返回 Message，转换层负责在通用类型与 provider 私有格式间互转。
-// 类型设计 AgentMessage 联合类型。
+// 类型设计为通用消息联合类型。
 package message
 
 // Role 标识消息的发言角色。

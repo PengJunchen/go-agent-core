@@ -4,8 +4,7 @@
 // ArgumentsPreparer 可选接口提供 PrepareArguments 能力，
 // 允许在工具执行前预处理参数（如 LLM 填充缺失参数、校验/转换参数）。
 //
-// 这是 的 beforeToolCall/afterToolCall/prepareArguments 等价能力，
-// 弥补了 仅观察无法拦截的缺陷。
+// Before/After 双钩子弥补了仅观察无法拦截的缺陷。
 //
 // HookPipeline 按优先级顺序执行 Before（升序），After（降序），
 // 任一 Before 返回 Block=true 则阻止执行。

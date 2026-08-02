@@ -1,7 +1,7 @@
 // Package stream 定义 LLM 流式响应的事件类型。
 //
 // StreamEvent 由 ModelProvider.StreamChat 产出，经 agent 引擎消费后
-// 转换为 AgentEvent。事件类型
+// 转换为 AgentEvent。事件类型包括：
 // 文本增量、思维增量、工具调用开始/结果、完成、错误。
 package stream
 

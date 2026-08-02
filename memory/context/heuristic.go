@@ -5,7 +5,7 @@
 // 在 GetMessages 时返回维护的历史，在 TokenUsage 时返回估算值，
 // 并在 Compact 时按策略委派给对应的 Compactor（方案 C：双 Compactor）。
 //
-// 设计 ContextManager，默认触发 M0 级启发式逻辑。
+// 默认触发 M0 级启发式逻辑。
 package context
 
 import (

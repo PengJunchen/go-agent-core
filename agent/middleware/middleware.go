@@ -1,7 +1,8 @@
 // Package middleware 定义中间件链抽象。
 //
 // Middleware 在 Turn 级别注入逻辑（BeforeTurn/AfterTurn/BeforeCompact/
-// AfterCompact）。中间件链由 LoopAgent 在调度时执行，
+// AfterCompact）。中间件链由 LoopAgent 在调度时执行。
+// core 自有接口，不直接实现 Eino 的
 // ChatModelAgentMiddleware。
 package middleware
 

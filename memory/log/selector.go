@@ -1,6 +1,6 @@
 // Package log 的 LogSelector 实现。
 //
-// LogSelector 是配置驱动的选择性日志取走，。
+// LogSelector 是配置驱动的选择性日志取走。
 // 支持 type/level/tags/time 四维度过滤，输出到 io.Writer 或文件。
 //
 // 设计原则：日志永远写入（不可关闭），用户通过 Select 选择性取走感兴趣的子集。

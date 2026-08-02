@@ -63,7 +63,7 @@ func main() {
 		}
 	}
 
-	// Load settings from .go-agent/settings.json ().
+	// Load settings from .go-agent/settings.json.
 	settingsMgr := config.NewSettingsManager()
 	_ = settingsMgr.LoadGlobal()
 	_ = settingsMgr.LoadProject(workspace)

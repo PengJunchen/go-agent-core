@@ -2,7 +2,7 @@
 //
 // DefaultLoopAgent 是 LoopAgent 的参考实现，实现完整的
 // query → dispatch → turn → event 调度循环。
-// 它保持 完整能力（串行 dispatch、Turn 管理、
+// 保持完整能力（串行 dispatch、Turn 管理、
 // Interrupt/Steer/FollowUp 干预、状态机），同时通过 L4/L3/L2 接口
 // 解耦实现可替换性。
 package loop
@@ -20,10 +20,10 @@ import (
 	"github.com/pengjunchen/go-agent-core/agent/middleware"
 	"github.com/pengjunchen/go-agent-core/capability/registry"
 	"github.com/pengjunchen/go-agent-core/capability/toolhook"
-	ctxpkg "github.com/pengjunchen/go-agent-core/memory/context"
-	"github.com/pengjunchen/go-agent-core/memory/log"
 	"github.com/pengjunchen/go-agent-core/llm/message"
 	"github.com/pengjunchen/go-agent-core/llm/provider"
+	ctxpkg "github.com/pengjunchen/go-agent-core/memory/context"
+	"github.com/pengjunchen/go-agent-core/memory/log"
 	"github.com/pengjunchen/go-agent-core/production"
 )
 
