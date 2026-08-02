@@ -5,7 +5,7 @@
 > 完整行为约束、设计决策、验收规范等详见 [go-agent-core-v1-infra](../go-agent-core-v1-infra/) 仓库：
 > - [CLAUDE.md](../go-agent-core-v1-infra/CLAUDE.md) — 完整 LLM 行为约束
 > - [AGENTS.md](../go-agent-core-v1-infra/AGENTS.md) — 完整跨工具标准
-> - [docs/](../go-agent-core-v1-infra/docs/) — 架构文档、ADR、里程碑、矩阵
+> - [docs/](../go-agent-core-v1-infra/docs/) — 架构文档、ADR、里程碑
 > - [infra/](../go-agent-core-v1-infra/infra/) — 任务规划与追踪
 > - [e2e_testing/](../go-agent-core-v1-infra/e2e_testing/) — E2E 测试框架
 

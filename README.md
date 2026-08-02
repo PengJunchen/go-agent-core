@@ -2,7 +2,7 @@
 
 > 接口驱动、分层清晰、日志永驻的智能体核心框架
 
-go-agent-core 从 所有核心能力（LLM / 记忆 / 工具 / 日志）均通过 interface 定义，用户可替换任何组件。
+go-agent-core 是接口驱动、分层清晰的智能体核心框架。所有核心能力（LLM / 记忆 / 工具 / 日志）均通过 interface 定义，用户可替换任何组件。
 
 ## 架构概览
 
@@ -35,6 +35,7 @@ import (
  "context"
  "fmt"
  "log"
+ "os"
 
  "github.com/cloudwego/eino-ext/components/model/openai"
  "github.com/pengjunchen/go-agent-core/agent/event"
