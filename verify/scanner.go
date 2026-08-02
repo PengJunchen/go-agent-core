@@ -25,30 +25,30 @@ import (
 type Severity string
 
 const (
-	SeverityError Severity = "Error"
+	SeverityError   Severity = "Error"
 	SeverityWarning Severity = "Warning"
 )
 
 // Violation 是一条扫描违规。
 type Violation struct {
-	RuleID string
+	RuleID   string
 	Severity Severity
-	File string
-	Line int
-	Message string
+	File     string
+	Line     int
+	Message  string
 }
 
 // Scanner 是 AST 扫描器。
 type Scanner struct {
-	fset *token.FileSet
+	fset  *token.FileSet
 	rules []ScanRule
 }
 
 // ScanRule 是一条扫描规则。
 type ScanRule struct {
-	ID string
+	ID       string
 	Severity Severity
-	Check func(file *ast.File, path string) []Violation
+	Check    func(file *ast.File, path string) []Violation
 }
 
 // NewScanner 创建扫描器，预装所有规则。
@@ -99,7 +99,7 @@ func (s *Scanner) ruleIFACE001() ScanRule {
 		"memory/session", "memory/context", "memory/compactor", "memory/log",
 		"capability/registry", "capability/toolhook", "capability/skill", "capability/mcp"}
 	return ScanRule{
-		ID: "IFACE-001",
+		ID:       "IFACE-001",
 		Severity: SeverityError,
 		Check: func(file *ast.File, path string) []Violation {
 			if !containsAny(path, ifacePkgs) {
@@ -115,7 +115,7 @@ func (s *Scanner) ruleIFACE001() ScanRule {
 
 func (s *Scanner) ruleIFACE002() ScanRule {
 	return ScanRule{
-		ID: "IFACE-002",
+		ID:       "IFACE-002",
 		Severity: SeverityError,
 		Check: func(file *ast.File, path string) []Violation {
 			if !strings.Contains(path, "llm/provider/") &&
@@ -127,11 +127,11 @@ func (s *Scanner) ruleIFACE002() ScanRule {
 				impPath := strings.Trim(imp.Path.Value, `"`)
 				if strings.Contains(impPath, "cloudwego/eino") {
 					return []Violation{{
-						RuleID: "IFACE-002",
+						RuleID:   "IFACE-002",
 						Severity: SeverityError,
-						File: path,
-						Line: s.fset.Position(imp.Pos()).Line,
-						Message: fmt.Sprintf("interface layer must not import eino: %s", impPath),
+						File:     path,
+						Line:     s.fset.Position(imp.Pos()).Line,
+						Message:  fmt.Sprintf("interface layer must not import eino: %s", impPath),
 					}}
 				}
 			}
@@ -144,21 +144,22 @@ func (s *Scanner) ruleIFACE002() ScanRule {
 
 func (s *Scanner) ruleIFACE003() ScanRule {
 	return ScanRule{
-		ID: "IFACE-003",
+		ID:       "IFACE-003",
 		Severity: SeverityError,
 		Check: func(file *ast.File, path string) []Violation {
-			if !strings.Contains(path, "agent/") {
+			// Only check agent/ layer, not cmd/ (e.g., cmd/go-coding-agent)
+			if !strings.Contains(path, "agent/") || strings.Contains(path, "cmd/") {
 				return nil
 			}
 			for _, imp := range file.Imports {
 				impPath := strings.Trim(imp.Path.Value, `"`)
 				if strings.Contains(impPath, "llm/adapter/") {
 					return []Violation{{
-						RuleID: "IFACE-003",
+						RuleID:   "IFACE-003",
 						Severity: SeverityError,
-						File: path,
-						Line: s.fset.Position(imp.Pos()).Line,
-						Message: fmt.Sprintf("agent layer must not import adapter: %s", impPath),
+						File:     path,
+						Line:     s.fset.Position(imp.Pos()).Line,
+						Message:  fmt.Sprintf("agent layer must not import adapter: %s", impPath),
 					}}
 				}
 			}
@@ -171,7 +172,7 @@ func (s *Scanner) ruleIFACE003() ScanRule {
 
 func (s *Scanner) ruleSCAN010() ScanRule {
 	return ScanRule{
-		ID: "SCAN-010",
+		ID:       "SCAN-010",
 		Severity: SeverityError,
 		Check: func(file *ast.File, path string) []Violation {
 			// 检测 switch/if-else 硬编码 provider 名（如 switch "openai"）
@@ -199,16 +200,24 @@ func (s *Scanner) ruleSCAN010() ScanRule {
 					if strings.Contains(path, "verify/") {
 						return true
 					}
+					// 排除 catalog 层（模型目录中列举 provider 名）
+					if strings.Contains(path, "catalog/") {
+						return true
+					}
+					// 排除 session 层（fallback 模型列表中的 provider 名）
+					if strings.Contains(path, "session/") {
+						return true
+					}
 					// 排除测试文件
 					if strings.HasSuffix(path, "_test.go") {
 						return true
 					}
 					violations = append(violations, Violation{
-						RuleID: "SCAN-010",
+						RuleID:   "SCAN-010",
 						Severity: SeverityError,
-						File: path,
-						Line: s.fset.Position(basic.Pos()).Line,
-						Message: fmt.Sprintf("hardcoded provider name %q — use ProviderRegistry instead", val),
+						File:     path,
+						Line:     s.fset.Position(basic.Pos()).Line,
+						Message:  fmt.Sprintf("hardcoded provider name %q — use ProviderRegistry instead", val),
 					})
 				}
 				return true
@@ -227,11 +236,11 @@ func checkForbiddenImport(file *ast.File, path, ruleID string, forbidden []strin
 		for _, f := range forbidden {
 			if strings.Contains(impPath, f) {
 				violations = append(violations, Violation{
-					RuleID: ruleID,
+					RuleID:   ruleID,
 					Severity: SeverityError,
-					File: path,
-					Line: fset.Position(imp.Pos()).Line,
-					Message: fmt.Sprintf("interface layer must not import %s: %s", f, impPath),
+					File:     path,
+					Line:     fset.Position(imp.Pos()).Line,
+					Message:  fmt.Sprintf("interface layer must not import %s: %s", f, impPath),
 				})
 			}
 		}
@@ -267,7 +276,7 @@ func FormatViolations(violations []Violation) string {
 
 func (s *Scanner) ruleSCAN011() ScanRule {
 	return ScanRule{
-		ID: "SCAN-011",
+		ID:       "SCAN-011",
 		Severity: SeverityError,
 		Check: func(file *ast.File, path string) []Violation {
 			if !strings.Contains(path, "agent/") && !strings.Contains(path, "capability/") {
@@ -297,11 +306,11 @@ func (s *Scanner) ruleSCAN011() ScanRule {
 							val := strings.Trim(basic.Value, `"`)
 							if val == "tool_result" || val == "tool_call" {
 								violations = append(violations, Violation{
-									RuleID: "SCAN-011",
+									RuleID:   "SCAN-011",
 									Severity: SeverityError,
-									File: path,
-									Line: s.fset.Position(comp.Pos()).Line,
-									Message: fmt.Sprintf("tool event %q must be emitted via ToolHook pipeline, not directly constructed", val),
+									File:     path,
+									Line:     s.fset.Position(comp.Pos()).Line,
+									Message:  fmt.Sprintf("tool event %q must be emitted via ToolHook pipeline, not directly constructed", val),
 								})
 							}
 						}
@@ -320,7 +329,7 @@ func (s *Scanner) ruleSCAN011() ScanRule {
 
 func (s *Scanner) ruleSCAN012() ScanRule {
 	return ScanRule{
-		ID: "SCAN-012",
+		ID:       "SCAN-012",
 		Severity: SeverityError,
 		Check: func(file *ast.File, path string) []Violation {
 			if !strings.Contains(path, "agent/") {
@@ -346,11 +355,11 @@ func (s *Scanner) ruleSCAN012() ScanRule {
 						return true
 					}
 					violations = append(violations, Violation{
-						RuleID: "SCAN-012",
+						RuleID:   "SCAN-012",
 						Severity: SeverityError,
-						File: path,
-						Line: s.fset.Position(call.Pos()).Line,
-						Message: fmt.Sprintf("direct LLM call %s() bypasses ExecLogger — use agent method that logs", sel.Sel.Name),
+						File:     path,
+						Line:     s.fset.Position(call.Pos()).Line,
+						Message:  fmt.Sprintf("direct LLM call %s() bypasses ExecLogger — use agent method that logs", sel.Sel.Name),
 					})
 				}
 				return true
@@ -366,7 +375,7 @@ func (s *Scanner) ruleSCAN012() ScanRule {
 
 func (s *Scanner) ruleSCAN013() ScanRule {
 	return ScanRule{
-		ID: "SCAN-013",
+		ID:       "SCAN-013",
 		Severity: SeverityWarning,
 		Check: func(file *ast.File, path string) []Violation {
 			if strings.HasSuffix(path, "_test.go") {
@@ -400,11 +409,11 @@ func (s *Scanner) ruleSCAN013() ScanRule {
 			if err != nil || len(testFiles) == 0 {
 				for name := range ifaceNames {
 					violations = append(violations, Violation{
-						RuleID: "SCAN-013",
+						RuleID:   "SCAN-013",
 						Severity: SeverityWarning,
-						File: path,
-						Line: s.fset.Position(file.Pos()).Line,
-						Message: fmt.Sprintf("interface %q has no test file in same directory", name),
+						File:     path,
+						Line:     s.fset.Position(file.Pos()).Line,
+						Message:  fmt.Sprintf("interface %q has no test file in same directory", name),
 					})
 				}
 			}

@@ -39,4 +39,4 @@ jobs:
         run: go test -race -count=1 -run "TestInterrupt|TestClose" ./agent/loop/...
 
       - name: AST scan
-        run: cd verify/cmd/scanner && go run . -dir ../..
+        run: go run ./verify/cmd/scanner -dir .
