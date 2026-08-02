@@ -119,6 +119,41 @@ func TestNoopProvider_ModelInfoReturnNonNil(t *testing.T) {
 	}
 }
 
+// VQ-007 (AC-1): ModelInfo 包含 CacheReadPerMillion 和 CacheWritePerMillion 字段。
+func TestModelInfo_CacheCostFields(t *testing.T) {
+	info := &ModelInfo{
+		Provider: "anthropic",
+		ModelName: "claude-3.5-sonnet",
+		CostInputPerMillion: 3.0,
+		CostOutputPerMillion: 15.0,
+		CacheReadPerMillion: 0.3,
+		CacheWritePerMillion: 3.75,
+	}
+	if info.CacheReadPerMillion != 0.3 {
+		t.Errorf("CacheReadPerMillion = %v, want 0.3", info.CacheReadPerMillion)
+	}
+	if info.CacheWritePerMillion != 3.75 {
+		t.Errorf("CacheWritePerMillion = %v, want 3.75", info.CacheWritePerMillion)
+	}
+}
+
+// VQ-008 (AC-2): 未设置缓存字段时为零值（向后兼容）。
+func TestModelInfo_CacheCostFieldsZeroValue(t *testing.T) {
+	info := &ModelInfo{
+		Provider: "openai",
+		ModelName: "gpt-4o",
+		CostInputPerMillion: 2.5,
+		CostOutputPerMillion: 10.0,
+		// CacheReadPerMillion and CacheWritePerMillion not set
+	}
+	if info.CacheReadPerMillion != 0 {
+		t.Errorf("CacheReadPerMillion = %v, want 0 (zero value)", info.CacheReadPerMillion)
+	}
+	if info.CacheWritePerMillion != 0 {
+		t.Errorf("CacheWritePerMillion = %v, want 0 (zero value)", info.CacheWritePerMillion)
+	}
+}
+
 // noopProvider 用于编译验证的空实现。
 type noopProvider struct{}
 

@@ -25,13 +25,33 @@ type ModelProvider interface {
 
 // ModelInfo 描述模型的能力与限制。
 type ModelInfo struct {
-	Provider string
-	ModelName string
-	MaxTokens int
-	SupportsThinking bool
-	SupportsVision bool
-	SupportsStreaming bool
-	Capabilities []string // extensible capability list (e.g., "vision", "thinking", "streaming", "tool_use")
+	Provider string `json:"provider"`
+	ModelName string `json:"model"`
+	MaxTokens int `json:"max_tokens,omitempty"`
+	MaxInputTokens int `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+	ContextWindow int `json:"context_window,omitempty"`
+	SupportsStreaming bool `json:"supports_streaming"`
+	SupportsThinking bool `json:"supports_thinking,omitempty"`
+	SupportsVision bool `json:"supports_vision,omitempty"`
+
+	// Cost information (per million tokens)
+	CostInputPerMillion float64 `json:"cost_input_per_million,omitempty"`
+	CostOutputPerMillion float64 `json:"cost_output_per_million,omitempty"`
+	CacheReadPerMillion float64 `json:"cache_read_per_million,omitempty"`
+	CacheWritePerMillion float64 `json:"cache_write_per_million,omitempty"`
+
+	// Compatibility flags (e.g., {"tool_use": true, "json_mode": true})
+	Compat map[string]bool `json:"compat,omitempty"`
+
+	// ThinkingLevelMap maps thinking level names to token budgets for models
+	// that support configurable thinking (e.g., {"low": 1024, "medium": 4096, "high": 16384}).
+	ThinkingLevelMap map[string]int `json:"thinking_level_map,omitempty"`
+
+	// Capabilities is an extensible capability list (e.g., "vision", "thinking",
+	// "streaming", "tool_use"). Retained for backward compatibility; prefer Compat
+	// for structured capability flags.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // HasCapability checks whether the model supports the given capability.
@@ -63,6 +83,7 @@ type ChatOptions struct {
 	ThinkingMode *ThinkingConfig
 	ToolChoice *ToolChoiceConfig
 	Tools []ToolSpec
+	ResponseFormat *ResponseFormat // AC-2: Constrained sampling (json_schema / grammar)
 }
 
 // ThinkingConfig 跨 provider 归一化的思维控制。
