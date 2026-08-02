@@ -1312,3 +1312,105 @@ func TestLoopGenerator_ThinkingDelta(t *testing.T) {
 		t.Errorf("thinking content = %q, want %q", thinkingContent, "Let me think...")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// blankLineCollapser 测试
+// ---------------------------------------------------------------------------
+
+func TestCollapseBlankLines(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{"no change", "hello\nworld", "hello\nworld"},
+		{"single blank line", "hello\n\nworld", "hello\n\nworld"},
+		{"two blank lines collapsed", "hello\n\n\nworld", "hello\n\nworld"},
+		{"three blank lines collapsed", "hello\n\n\n\nworld", "hello\n\nworld"},
+		{"many blank lines", "hello\n\n\n\n\n\nworld", "hello\n\nworld"},
+		{"trailing blank lines", "hello\n\n\n", "hello\n\n"},
+		{"empty string", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := collapseBlankLines(tt.input); got != tt.want {
+				t.Errorf("collapseBlankLines(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBlankLineCollapser_Stream(t *testing.T) {
+	// 场景：单个 delta 内含多个连续空行
+	t.Run("single delta collapse", func(t *testing.T) {
+		c := &blankLineCollapser{}
+		got := c.collapse("hello\n\n\n\nworld")
+		want := "hello\n\nworld"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	// 场景：空行跨越 delta 边界
+	t.Run("cross delta boundary", func(t *testing.T) {
+		c := &blankLineCollapser{}
+		d1 := c.collapse("hello\n\n") // trailingNL=2
+		if d1 != "hello\n\n" {
+			t.Errorf("delta1: got %q, want %q", d1, "hello\n\n")
+		}
+		d2 := c.collapse("\nworld") // total=3, suppress 1
+		if d2 != "world" {
+			t.Errorf("delta2: got %q, want %q", d2, "world")
+		}
+	})
+
+	// 场景：delta 全是换行
+	t.Run("all newlines delta", func(t *testing.T) {
+		c := &blankLineCollapser{}
+		d1 := c.collapse("hello\n")
+		if d1 != "hello\n" {
+			t.Errorf("delta1: got %q, want %q", d1, "hello\n")
+		}
+		d2 := c.collapse("\n\n\n") // total=4, internal collapse→\n\n, total with trailing=3, suppress 1
+		if d2 != "\n" {
+			t.Errorf("delta2: got %q, want %q", d2, "\n")
+		}
+		d3 := c.collapse("world")
+		if d3 != "world" {
+			t.Errorf("delta3: got %q, want %q", d3, "world")
+		}
+	})
+
+	// 场景：不跨边界的正常文本
+	t.Run("no boundary issue", func(t *testing.T) {
+		c := &blankLineCollapser{}
+		d1 := c.collapse("hello ")
+		if d1 != "hello " {
+			t.Errorf("delta1: got %q, want %q", d1, "hello ")
+		}
+		d2 := c.collapse("world")
+		if d2 != "world" {
+			t.Errorf("delta2: got %q, want %q", d2, "world")
+		}
+	})
+
+	// 场景：空 delta
+	t.Run("empty delta", func(t *testing.T) {
+		c := &blankLineCollapser{}
+		got := c.collapse("")
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+
+	// 场景：正常空行保留
+	t.Run("single blank line preserved", func(t *testing.T) {
+		c := &blankLineCollapser{}
+		d1 := c.collapse("hello\n")
+		d2 := c.collapse("\nworld") // total=2, no suppression
+		if d1 != "hello\n" {
+			t.Errorf("delta1: got %q, want %q", d1, "hello\n")
+		}
+		if d2 != "\nworld" {
+			t.Errorf("delta2: got %q, want %q", d2, "\nworld")
+		}
+	})
+}

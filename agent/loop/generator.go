@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand"
+	"regexp"
 	"time"
 
 	"github.com/pengjunchen/go-agent-core/agent/event"
@@ -314,6 +315,7 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 		var thinkingContent string
 		var finishReason string
 		streamDone := false
+		collapser := &blankLineCollapser{}
 
 		// 发射消息开始事件（LLM 响应开始）
 		emitEvent(eventCh, event.AgentEvent{
@@ -327,13 +329,14 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 		for streamEvt := range streamCh {
 			switch streamEvt.Type {
 			case stream.StreamTextDelta:
-				textContent += streamEvt.Content
+				collapsed := collapser.collapse(streamEvt.Content)
+				textContent += collapsed
 				evt := event.AgentEvent{
 					Type: event.EventTextDelta,
 					SubmissionID: params.SubmissionID,
 					TurnID: params.TurnID,
 					SessionID: params.SessionID,
-					Payload: streamEvt.Content,
+					Payload: collapsed,
 					Timestamp: time.Now().UnixMilli(),
 				}
 				emitEvent(eventCh, evt)
@@ -344,7 +347,7 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 					SessionID: params.SessionID,
 					Payload: event.MessageUpdatePayload{
 						Type: event.MessageUpdateText,
-						Content: streamEvt.Content,
+						Content: collapsed,
 					},
 					Timestamp: time.Now().UnixMilli(),
 				})
@@ -1602,4 +1605,67 @@ func serializeMessages(msgs []message.Message) any {
 		out = append(out, ml)
 	}
 	return out
+}
+
+// ─── 空行折叠 ───────────────────────────────────────────────────
+
+// multiBlankLineRe 匹配 3 个及以上连续换行（即 2 个及以上空行）。
+var multiBlankLineRe = regexp.MustCompile(`\n{3,}`)
+
+// collapseBlankLines 将连续多个空行折叠为一个（3+ 换行 → 2 换行）。
+func collapseBlankLines(s string) string {
+	return multiBlankLineRe.ReplaceAllString(s, "\n\n")
+}
+
+// blankLineCollapser 流式折叠器，跨 delta 边界跟踪连续换行。
+//
+// 流式场景下，一个空行可能跨越两个 delta：
+//
+//	delta1: "hello\n\n" (trailingNL=2)
+//	delta2: "\nworld" (leadingNL=1, total=3 → 抑制 1)
+//
+// 折叠策略：跨 delta 累计换行不超过 2（即最多 1 个空行）。
+type blankLineCollapser struct {
+	trailingNL int // 上一个 delta 末尾的连续换行数
+}
+
+// collapse 处理单个 text delta，返回折叠后的文本。
+func (c *blankLineCollapser) collapse(delta string) string {
+	if delta == "" {
+		return ""
+	}
+
+	// 1. 先对 delta 内部做正则折叠（处理单 delta 内的 3+ 换行）
+	processed := multiBlankLineRe.ReplaceAllString(delta, "\n\n")
+
+	// 2. 跨 delta 边界：统计本 delta 开头的连续换行
+	leadingNL := 0
+	for i := 0; i < len(processed); i++ {
+		if processed[i] == '\n' {
+			leadingNL++
+		} else {
+			break
+		}
+	}
+
+	// 3. 如果与前一个 delta 的尾部换行叠加超过 2，抑制多余的
+	if c.trailingNL > 0 && leadingNL > 0 {
+		total := c.trailingNL + leadingNL
+		if total > 2 {
+			suppress := min(total-2, leadingNL)
+			processed = processed[suppress:]
+		}
+	}
+
+	// 4. 更新尾部换行计数
+	c.trailingNL = 0
+	for i := len(processed) - 1; i >= 0; i-- {
+		if processed[i] == '\n' {
+			c.trailingNL++
+		} else {
+			break
+		}
+	}
+
+	return processed
 }
