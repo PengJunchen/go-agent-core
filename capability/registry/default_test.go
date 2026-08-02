@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -221,4 +222,147 @@ func TestDefaultToolRegistry_ErrorMessages(t *testing.T) {
 	if !strings.Contains(err.Error(), "ghost-tool") {
 		t.Errorf("unregister missing error should include tool name, got: %v", err)
 	}
+}
+
+// DT-014: RegisterDeferred 注册延迟加载工具，定义立即可用，Handler 按需加载。
+func TestDefaultToolRegistry_RegisterDeferred(t *testing.T) {
+	r := NewDefaultToolRegistry()
+
+	loadCount := 0
+	loader := &testDeferredLoader{
+		load: func() (ToolHandler, error) {
+			loadCount++
+			return func(_ context.Context, _ map[string]any) (*ToolResult, error) {
+				return &ToolResult{Content: "deferred-ok"}, nil
+			}, nil
+		},
+	}
+
+	def := ToolDefinition{
+		Name: "deferred-tool",
+		Description: "A deferred tool",
+		Parameters: map[string]any{"type": "object"},
+	}
+
+	// 注册后定义应可用
+	if err := r.RegisterDeferred(context.Background(), def, loader); err != nil {
+		t.Fatalf("RegisterDeferred: %v", err)
+	}
+
+	// Loader 不应被立即调用
+	if loadCount != 0 {
+		t.Errorf("loadCount = %d before invocation, want 0", loadCount)
+	}
+
+	// 工具定义可查询
+	got, err := r.GetTool(context.Background(), "deferred-tool")
+	if err != nil {
+		t.Fatalf("GetTool after RegisterDeferred: %v", err)
+	}
+	if got.Name != "deferred-tool" {
+		t.Errorf("got.Name = %q, want %q", got.Name, "deferred-tool")
+	}
+
+	// 首次调用 Handler 时加载
+	result, err := got.Handler(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Handler call: %v", err)
+	}
+	if result.Content != "deferred-ok" {
+		t.Errorf("Handler result = %q, want %q", result.Content, "deferred-ok")
+	}
+	if loadCount != 1 {
+		t.Errorf("loadCount = %d after first call, want 1", loadCount)
+	}
+
+	// 第二次调用不应重新加载
+	_, _ = got.Handler(context.Background(), nil)
+	if loadCount != 1 {
+		t.Errorf("loadCount = %d after second call, want 1 (cached)", loadCount)
+	}
+}
+
+// DT-015: RegisterDeferred 拒绝空名称。
+func TestDefaultToolRegistry_RegisterDeferredEmptyName(t *testing.T) {
+	r := NewDefaultToolRegistry()
+	loader := &testDeferredLoader{
+		load: func() (ToolHandler, error) {
+			return func(_ context.Context, _ map[string]any) (*ToolResult, error) {
+				return &ToolResult{Content: "ok"}, nil
+			}, nil
+		},
+	}
+	err := r.RegisterDeferred(context.Background(), ToolDefinition{}, loader)
+	if err == nil {
+		t.Error("RegisterDeferred with empty name should fail")
+	}
+}
+
+// DT-016: RegisterDeferred 拒绝重复注册。
+func TestDefaultToolRegistry_RegisterDeferredDuplicate(t *testing.T) {
+	r := NewDefaultToolRegistry()
+	loader := &testDeferredLoader{
+		load: func() (ToolHandler, error) {
+			return func(_ context.Context, _ map[string]any) (*ToolResult, error) {
+				return &ToolResult{Content: "ok"}, nil
+			}, nil
+		},
+	}
+	def := ToolDefinition{Name: "dup-deferred"}
+	if err := r.RegisterDeferred(context.Background(), def, loader); err != nil {
+		t.Fatalf("first RegisterDeferred: %v", err)
+	}
+	if err := r.RegisterDeferred(context.Background(), def, loader); err == nil {
+		t.Error("duplicate RegisterDeferred should fail")
+	}
+}
+
+// DT-017: RegisterDeferred 加载失败时 Handler 调用返回错误。
+func TestDefaultToolRegistry_RegisterDeferredLoadError(t *testing.T) {
+	r := NewDefaultToolRegistry()
+	loadErr := errors.New("load failed")
+	loader := &testDeferredLoader{
+		load: func() (ToolHandler, error) {
+			return nil, loadErr
+		},
+	}
+	def := ToolDefinition{Name: "load-err-tool"}
+	if err := r.RegisterDeferred(context.Background(), def, loader); err != nil {
+		t.Fatalf("RegisterDeferred: %v", err)
+	}
+
+	got, _ := r.GetTool(context.Background(), "load-err-tool")
+	_, err := got.Handler(context.Background(), nil)
+	if err == nil {
+		t.Error("Handler should return error when Load fails")
+	}
+}
+
+// DT-018: RegisterDeferred 工具出现在 ListTools 中。
+func TestDefaultToolRegistry_RegisterDeferredListed(t *testing.T) {
+	r := NewDefaultToolRegistry()
+	loader := &testDeferredLoader{
+		load: func() (ToolHandler, error) {
+			return func(_ context.Context, _ map[string]any) (*ToolResult, error) {
+				return &ToolResult{Content: "ok"}, nil
+			}, nil
+		},
+	}
+	_ = r.RegisterDeferred(context.Background(), ToolDefinition{Name: "listed-deferred"}, loader)
+	tools, err := r.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name != "listed-deferred" {
+		t.Errorf("ListTools = %v, want [listed-deferred]", tools)
+	}
+}
+
+// testDeferredLoader 是测试用 DeferredLoader 实现。
+type testDeferredLoader struct {
+	load func() (ToolHandler, error)
+}
+
+func (l *testDeferredLoader) Load() (ToolHandler, error) {
+	return l.load()
 }

@@ -103,17 +103,50 @@ func (p *FileSkillProvider) Available(_ context.Context) ([]SkillDefinition, err
 
 // scanDir 扫描单个目录下的 SKILL.md 文件。
 // 调用方须持有写锁。
+//
+// 支持 .gitignore 解析：扫描时读取目录下的 .gitignore 文件，
+// 跳过匹配模式的文件/目录。同时始终跳过 node_modules/、dist/、.git/、vendor/。
+// 符号链接会被跳过以避免循环和重复（AC-4）。
 func (p *FileSkillProvider) scanDir(dir string) ([]SkillDefinition, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
 
+	// 解析当前目录下的 .gitignore（如果存在）。
+	var ignorePatterns []string
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	if patterns, err := parseGitignore(gitignorePath); err == nil {
+		ignorePatterns = patterns
+	}
+
 	var skills []SkillDefinition
 	for _, entry := range entries {
+		name := entry.Name()
+
+		// 跳过 .gitignore 文件本身。
+		if name == ".gitignore" {
+			continue
+		}
+
+		// 跳过符号链接（AC-4: symlink deduplication）。
+		if isSymlink(dir, entry) {
+			continue
+		}
+
+		// 跳过默认忽略的目录。
+		if entry.IsDir() && isDefaultIgnored(name) {
+			continue
+		}
+
+		// 跳过 .gitignore 匹配的条目。
+		if matchGitignorePattern(name, ignorePatterns) {
+			continue
+		}
+
 		if entry.IsDir() {
 			// 递归进入子目录查找 SKILL.md
-			sub := filepath.Join(dir, entry.Name())
+			sub := filepath.Join(dir, name)
 			subSkills, err := p.scanDir(sub)
 			if err != nil {
 				return nil, err
@@ -121,8 +154,8 @@ func (p *FileSkillProvider) scanDir(dir string) ([]SkillDefinition, error) {
 			skills = append(skills, subSkills...)
 			continue
 		}
-		if entry.Name() == "SKILL.md" {
-			path := filepath.Join(dir, entry.Name())
+		if name == "SKILL.md" {
+			path := filepath.Join(dir, name)
 			skill, err := p.parseSkillFile(path)
 			if err != nil {
 				return nil, err

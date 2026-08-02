@@ -83,3 +83,38 @@ func (r *DefaultToolRegistry) ListTools(_ context.Context) ([]ToolDefinition, er
 func (r *DefaultToolRegistry) Reload(_ context.Context) error {
 	return nil
 }
+
+// RegisterDeferred 注册一个延迟加载工具。工具定义（名称、描述、参数）立即可用，
+// 但 Handler 仅在首次调用时通过 loader.Load() 加载。加载后缓存，后续调用
+// 直接使用缓存 Handler，对 Agent 循环完全透明。
+func (r *DefaultToolRegistry) RegisterDeferred(_ context.Context, definition ToolDefinition, loader DeferredLoader) error {
+	if definition.Name == "" {
+		return errors.New("tool name is empty")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.tools[definition.Name]; exists {
+		return errors.New("tool already registered: " + definition.Name)
+	}
+
+	// 创建懒加载 Handler：首次调用时 Load，后续使用缓存
+	var handler ToolHandler
+	var handlerOnce sync.Once
+	var loadErr error
+
+	lazyHandler := ToolHandler(func(ctx context.Context, args map[string]any) (*ToolResult, error) {
+		handlerOnce.Do(func() {
+			handler, loadErr = loader.Load()
+		})
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		return handler(ctx, args)
+	})
+
+	definition.Handler = lazyHandler
+	r.tools[definition.Name] = definition
+	return nil
+}

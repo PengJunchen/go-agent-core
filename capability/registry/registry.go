@@ -11,6 +11,7 @@ type ToolDefinition struct {
 	Name string
 	Description string
 	Parameters map[string]any // JSON Schema
+	PromptGuidelines string // 工具使用指南，注入系统提示词
 	Handler ToolHandler
 	ParallelSafe bool // 标记该工具可安全并行调用
 	ValidateArgs bool // 标记该工具的参数需要校验
@@ -26,6 +27,12 @@ type ToolResult struct {
 	Details map[string]any
 }
 
+// DeferredLoader 由延迟加载工具实现，按需加载 Handler。
+// tools.DeferredTool 天然实现此接口（其 Load 方法签名一致）。
+type DeferredLoader interface {
+	Load() (ToolHandler, error)
+}
+
 // ToolRegistry 是工具注册表接口。
 type ToolRegistry interface {
 	RegisterTool(ctx context.Context, tool ToolDefinition) error
@@ -33,4 +40,8 @@ type ToolRegistry interface {
 	GetTool(ctx context.Context, toolName string) (ToolDefinition, error)
 	ListTools(ctx context.Context) ([]ToolDefinition, error)
 	Reload(ctx context.Context) error
+	// RegisterDeferred 注册一个延迟加载工具。工具定义（名称、描述、参数）立即可用，
+	// 但 Handler 仅在首次调用时通过 loader.Load() 加载。加载后缓存，后续调用
+	// 直接使用缓存 Handler，对 Agent 循环完全透明。
+	RegisterDeferred(ctx context.Context, definition ToolDefinition, loader DeferredLoader) error
 }

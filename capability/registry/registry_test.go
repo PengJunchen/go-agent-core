@@ -57,6 +57,23 @@ func (r *mockRegistry) Reload(_ context.Context) error {
 	return nil
 }
 
+func (r *mockRegistry) RegisterDeferred(_ context.Context, definition ToolDefinition, loader DeferredLoader) error {
+	if definition.Name == "" {
+		return errors.New("tool name is empty")
+	}
+	if _, exists := r.tools[definition.Name]; exists {
+		return errors.New("tool already registered: " + definition.Name)
+	}
+	// Simple eager load for mock — production impl uses lazy loading
+	handler, err := loader.Load()
+	if err != nil {
+		return err
+	}
+	definition.Handler = handler
+	r.tools[definition.Name] = definition
+	return nil
+}
+
 // Interface-001: ToolRegistry 接口可被 mock 实现。
 func TestToolRegistry_InterfaceContract(t *testing.T) {
 	var _ ToolRegistry = (*mockRegistry)(nil)
