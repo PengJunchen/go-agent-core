@@ -15,12 +15,12 @@ var _ registry.DeferredLoader = (*DeferredTool)(nil)
 // (for tool listing), but the Handler is loaded on demand via Loader.
 type DeferredTool struct {
 	Definition registry.ToolDefinition
-	Loader func() (registry.ToolHandler, error)
+	Loader     func() (registry.ToolHandler, error)
 
-	loaded bool
+	loaded  bool
 	handler registry.ToolHandler
 	loadErr error
-	mu sync.Mutex
+	mu      sync.Mutex
 }
 
 // Load invokes the Loader function and caches the result. Subsequent
@@ -52,7 +52,7 @@ func (dt *DeferredTool) RegisterTo(ctx context.Context, reg registry.ToolRegistr
 // This is useful when there are many tools but only a subset is commonly
 // used — the deferred tools' definitions can be listed for the LLM, but
 // their handlers are only instantiated when actually invoked.
-func SplitDeferredTools(toolHandlers []registry.ToolHandler, maxActive int) (active []registry.ToolHandler, deferred []DeferredTool) {
+func SplitDeferredTools(toolHandlers []registry.ToolHandler, maxActive int) (active []registry.ToolHandler, deferred []*DeferredTool) {
 	if len(toolHandlers) == 0 {
 		return nil, nil
 	}
@@ -69,7 +69,7 @@ func SplitDeferredTools(toolHandlers []registry.ToolHandler, maxActive int) (act
 
 	for i := maxActive; i < len(toolHandlers); i++ {
 		handler := toolHandlers[i]
-		dt := DeferredTool{
+		dt := &DeferredTool{
 			Loader: func() (registry.ToolHandler, error) {
 				return handler, nil
 			},
