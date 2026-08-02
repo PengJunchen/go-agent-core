@@ -37,5 +37,6 @@ require (
 	golang.org/x/arch v0.11.0 // indirect
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
 	golang.org/x/sys v0.29.0 // indirect
+	golang.org/x/text v0.14.0
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
