@@ -3,6 +3,8 @@ package context
 import (
 	"context"
 	"testing"
+
+	"github.com/pengjunchen/go-agent-core/memory/session"
 )
 
 // Compile-time interface check: HeuristicContextManager implements ContextManager.
@@ -631,5 +633,206 @@ func TestHeuristicContextManager_CompactZeroMaxTokens(t *testing.T) {
 	// With maxTokens=0, current token count is passed as limit
 	if receivedMaxTokens <= 0 {
 		t.Errorf("expected positive maxTokens for 0 threshold, got %d", receivedMaxTokens)
+	}
+}
+
+// ─── BuildContext 测试 ──────────────────────────────────────────
+
+// newTreeNodes creates a tree node with the given role and content.
+func newTreeNodes(role, content string) *session.TreeNode {
+	return &session.TreeNode{
+		Role: role,
+		Content: content,
+	}
+}
+
+// BC-001 (AC-1): BuildContext walks from leaf to nearest compaction checkpoint.
+func TestHeuristicContextManager_BuildContextWalksToCheckpoint(t *testing.T) {
+	m := NewHeuristicContextManager()
+	tree := session.NewSessionTree()
+
+	// Build tree: root → a1 → a2(checkpoint) → a3 → a4(leaf)
+	root := newTreeNodes("user", "hello")
+	_ = tree.AddNode(root)
+	a1 := newTreeNodes("assistant", "hi there")
+	_ = tree.AddNode(a1)
+	a2 := newTreeNodes("user", "how are you?")
+	a2.Metadata = map[string]any{
+		"compaction_checkpoint": "Summary of earlier conversation",
+	}
+	_ = tree.AddNode(a2)
+	a3 := newTreeNodes("assistant", "I'm fine")
+	_ = tree.AddNode(a3)
+	a4 := newTreeNodes("user", "great")
+	_ = tree.AddNode(a4)
+
+	if err := m.BuildContext(tree); err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+
+	got, _ := m.GetMessages(context.Background(), nil)
+
+	// Expected: [checkpoint summary (system)] + [a3, a4]
+	if len(got) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(got))
+	}
+	if got[0].Role != "system" || got[0].Content != "Summary of earlier conversation" {
+		t.Errorf("item[0] = {%s, %q}, want {system, %q}", got[0].Role, got[0].Content, "Summary of earlier conversation")
+	}
+	if got[1].Role != "assistant" || got[1].Content != "I'm fine" {
+		t.Errorf("item[1] = {%s, %q}, want {assistant, I'm fine}", got[1].Role, got[1].Content)
+	}
+	if got[2].Role != "user" || got[2].Content != "great" {
+		t.Errorf("item[2] = {%s, %q}, want {user, great}", got[2].Role, got[2].Content)
+	}
+}
+
+// BC-002 (AC-2): Compaction checkpoint correctly restores context.
+func TestHeuristicContextManager_BuildContextRestoresFromCheckpoint(t *testing.T) {
+	m := NewHeuristicContextManager()
+	tree := session.NewSessionTree()
+
+	// Build tree with a checkpoint at the root level
+	root := newTreeNodes("user", "original question")
+	root.Metadata = map[string]any{
+		"compaction_checkpoint": "Checkpoint: user asked about Go testing",
+	}
+	_ = tree.AddNode(root)
+	a1 := newTreeNodes("assistant", "Here's how to test in Go")
+	_ = tree.AddNode(a1)
+
+	if err := m.BuildContext(tree); err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+
+	got, _ := m.GetMessages(context.Background(), nil)
+
+	// Expected: [checkpoint summary (system)] + [a1]
+	if len(got) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(got))
+	}
+	if got[0].Role != "system" {
+		t.Errorf("item[0].Role = %s, want system", got[0].Role)
+	}
+	if got[0].Content != "Checkpoint: user asked about Go testing" {
+		t.Errorf("item[0].Content = %q, want checkpoint summary", got[0].Content)
+	}
+	if got[1].Role != "assistant" || got[1].Content != "Here's how to test in Go" {
+		t.Errorf("item[1] = {%s, %q}, want {assistant, Here's how to test in Go}", got[1].Role, got[1].Content)
+	}
+}
+
+// BC-003 (AC-3): Multiple compactions maintain coherent context.
+// The nearest checkpoint to the leaf should be used.
+func TestHeuristicContextManager_BuildContextMultipleCheckpoints(t *testing.T) {
+	m := NewHeuristicContextManager()
+	tree := session.NewSessionTree()
+
+	// Build tree: root(cp1) → a1 → a2(cp2) → a3(leaf)
+	root := newTreeNodes("user", "first question")
+	root.Metadata = map[string]any{
+		"compaction_checkpoint": "First checkpoint summary",
+	}
+	_ = tree.AddNode(root)
+	a1 := newTreeNodes("assistant", "first answer")
+	_ = tree.AddNode(a1)
+	a2 := newTreeNodes("user", "second question")
+	a2.Metadata = map[string]any{
+		"compaction_checkpoint": "Second checkpoint summary",
+	}
+	_ = tree.AddNode(a2)
+	a3 := newTreeNodes("assistant", "second answer")
+	_ = tree.AddNode(a3)
+
+	if err := m.BuildContext(tree); err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+
+	got, _ := m.GetMessages(context.Background(), nil)
+
+	// Expected: [second checkpoint summary (system)] + [a3]
+	// The nearest checkpoint (a2) should be used, not root's checkpoint
+	if len(got) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(got))
+	}
+	if got[0].Content != "Second checkpoint summary" {
+		t.Errorf("item[0].Content = %q, want %q (nearest checkpoint)", got[0].Content, "Second checkpoint summary")
+	}
+	if got[1].Role != "assistant" || got[1].Content != "second answer" {
+		t.Errorf("item[1] = {%s, %q}, want {assistant, second answer}", got[1].Role, got[1].Content)
+	}
+}
+
+// BC-004: BuildContext with no checkpoint uses all items from root to leaf.
+func TestHeuristicContextManager_BuildContextNoCheckpoint(t *testing.T) {
+	m := NewHeuristicContextManager()
+	tree := session.NewSessionTree()
+
+	root := newTreeNodes("user", "hello")
+	_ = tree.AddNode(root)
+	a1 := newTreeNodes("assistant", "hi")
+	_ = tree.AddNode(a1)
+	a2 := newTreeNodes("user", "bye")
+	_ = tree.AddNode(a2)
+
+	if err := m.BuildContext(tree); err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+
+	got, _ := m.GetMessages(context.Background(), nil)
+
+	// Expected: all 3 items in order
+	if len(got) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(got))
+	}
+	if got[0].Role != "user" || got[0].Content != "hello" {
+		t.Errorf("item[0] = {%s, %q}, want {user, hello}", got[0].Role, got[0].Content)
+	}
+	if got[1].Role != "assistant" || got[1].Content != "hi" {
+		t.Errorf("item[1] = {%s, %q}, want {assistant, hi}", got[1].Role, got[1].Content)
+	}
+	if got[2].Role != "user" || got[2].Content != "bye" {
+		t.Errorf("item[2] = {%s, %q}, want {user, bye}", got[2].Role, got[2].Content)
+	}
+}
+
+// BC-005: BuildContext with empty tree returns error.
+func TestHeuristicContextManager_BuildContextEmptyTree(t *testing.T) {
+	m := NewHeuristicContextManager()
+	tree := session.NewSessionTree()
+
+	err := m.BuildContext(tree)
+	if err == nil {
+		t.Error("BuildContext on empty tree: expected error, got nil")
+	}
+}
+
+// BC-006: BuildContext with checkpoint at leaf node.
+func TestHeuristicContextManager_BuildContextCheckpointAtLeaf(t *testing.T) {
+	m := NewHeuristicContextManager()
+	tree := session.NewSessionTree()
+
+	root := newTreeNodes("user", "hello")
+	_ = tree.AddNode(root)
+	a1 := newTreeNodes("assistant", "hi")
+	_ = tree.AddNode(a1)
+	a2 := newTreeNodes("user", "checkpoint here")
+	a2.Metadata = map[string]any{
+		"compaction_checkpoint": "Leaf checkpoint summary",
+	}
+	_ = tree.AddNode(a2)
+
+	if err := m.BuildContext(tree); err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+
+	got, _ := m.GetMessages(context.Background(), nil)
+
+	// Expected: just [checkpoint summary], no items after it
+	if len(got) != 1 {
+		t.Fatalf("expected 1 item (checkpoint summary only), got %d", len(got))
+	}
+	if got[0].Role != "system" || got[0].Content != "Leaf checkpoint summary" {
+		t.Errorf("item[0] = {%s, %q}, want {system, Leaf checkpoint summary}", got[0].Role, got[0].Content)
 	}
 }

@@ -44,6 +44,10 @@ const defaultTemperature = 0.3
 // defaultMaxTokens 是摘要生成的最大 token 数。
 const defaultMaxTokens = 1024
 
+// defaultMaxItemLength 是单个 TurnItem 内容的最大字符数，超过此长度的
+// tool result 会被 splitTurn 拆分为多个小片段。
+const defaultMaxItemLength = 2000
+
 // fileOpTools 是操作文件路径的工具集，用于从对话中提取文件操作记录。
 var fileOpTools = map[string]bool{
 	"read_file": true,
@@ -76,6 +80,7 @@ type SummaryCompactor struct {
 	temperature float64 // LLM 温度，默认 0.3
 	summaryPrompt string // 自定义提示词，空则用 defaultSummaryPrompt
 	maxTokens int // 摘要生成的最大 token 数，默认 1024
+	maxItemLength int // 单个 tool result 最大字符数，超过则拆分
 }
 
 // NewSummaryCompactor 构造 SummaryCompactor。
@@ -91,6 +96,7 @@ func NewSummaryCompactor(model provider.ModelProvider, est memctx.TokenEstimator
 		est: est,
 		temperature: defaultTemperature,
 		maxTokens: defaultMaxTokens,
+		maxItemLength: defaultMaxItemLength,
 	}
 }
 
@@ -110,6 +116,13 @@ func (s *SummaryCompactor) WithSummaryPrompt(prompt string) *SummaryCompactor {
 // WithMaxTokens 设置摘要生成的最大 token 数（默认 1024）。
 func (s *SummaryCompactor) WithMaxTokens(maxTokens int) *SummaryCompactor {
 	s.maxTokens = maxTokens
+	return s
+}
+
+// WithMaxItemLength 设置单个 tool result 内容的最大字符数（默认 2000）。
+// 超过此长度的 tool result 会被 splitTurn 拆分为多个小片段。
+func (s *SummaryCompactor) WithMaxItemLength(maxItemLength int) *SummaryCompactor {
+	s.maxItemLength = maxItemLength
 	return s
 }
 
@@ -217,16 +230,59 @@ tailFixed:
 	tail := convItems[tailStart:]
 
 	// 4. 提取文件操作。
+	// 在提取前，先对 head 中的过长 tool result 进行拆分（AC-1: splitTurn），
+	// 防止单个巨型工具结果主导上下文窗口。
+	head = splitTurn(head, sc.maxItemLength)
 	fileOps := extractFileOps(head)
 
-	// 5. 构造 LLM 提示。
-	conversationText := formatConversation(head)
-	prompt := sc.buildPrompt(conversationText, fileOps)
+	// 5. 检查是否存在已有摘要（来自上一次压缩的 checkpoint）。
+	// 若存在，优先使用 UpdateSummary 增量更新，避免从头重新生成，节省 LLM token。
+	// 若 UpdateSummary 失败，回退到完整重新生成。
+	var existingSummary string
+	for _, item := range systemItems {
+		if item.Metadata != nil {
+			if compacted, ok := item.Metadata["compacted"]; ok && compacted == true {
+				existingSummary = item.Content
+				break
+			}
+		}
+	}
 
-	// 6. 调用 LLM 生成摘要。
-	summaryText, err := sc.callLLM(ctx, prompt)
-	if err != nil {
-		return nil, fmt.Errorf("summary compact: generate summary: %w", err)
+	// 从 systemItems 中移除旧摘要项，避免结果中出现重复摘要。
+	if existingSummary != "" {
+		filtered := make([]memctx.TurnItem, 0, len(systemItems))
+		for _, item := range systemItems {
+			if item.Metadata != nil {
+				if compacted, ok := item.Metadata["compacted"]; ok && compacted == true {
+					continue
+				}
+			}
+			filtered = append(filtered, item)
+		}
+		systemItems = filtered
+	}
+
+	var summaryText string
+	var err error
+	if existingSummary != "" {
+		summaryText, err = sc.UpdateSummary(ctx, existingSummary, head)
+		if err != nil {
+			slog.Warn("update summary failed, falling back to full regeneration", "error", err)
+			// 回退到完整重新生成。
+			conversationText := formatConversation(head)
+			prompt := sc.buildPrompt(conversationText, fileOps)
+			summaryText, err = sc.callLLM(ctx, prompt)
+			if err != nil {
+				return nil, fmt.Errorf("summary compact: generate summary: %w", err)
+			}
+		}
+	} else {
+		conversationText := formatConversation(head)
+		prompt := sc.buildPrompt(conversationText, fileOps)
+		summaryText, err = sc.callLLM(ctx, prompt)
+		if err != nil {
+			return nil, fmt.Errorf("summary compact: generate summary: %w", err)
+		}
 	}
 
 	// 7. 构造摘要 TurnItem。
@@ -273,6 +329,11 @@ tailFixed:
 		"items_summarized", len(head),
 	)
 
+	// RetainedTail: the last few items kept alongside the summary (for session tree
+	// context reconstruction). These are the conversation items that were not summarized.
+	retainedTail := make([]memctx.TurnItem, len(tail))
+	copy(retainedTail, tail)
+
 	return &memctx.CompactResult{
 		Strategy: memctx.CompactSummary,
 		BeforeTokens: beforeTokens,
@@ -280,6 +341,7 @@ tailFixed:
 		ItemsRemoved: len(head),
 		Summary: summaryText,
 		RetainedItems: result,
+		RetainedTail: retainedTail,
 	}, nil
 }
 

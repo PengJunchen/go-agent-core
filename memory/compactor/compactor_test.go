@@ -181,3 +181,46 @@ func TestVS002_EmptyItems(t *testing.T) {
 func TestVS003_EstimatorInterface(t *testing.T) {
 	var _ memctx.TokenEstimator = (*HeuristicTokenEstimator)(nil)
 }
+
+// AC-14.2: TruncatingCompactor populates RetainedTail after compaction.
+// After truncation, RetainedTail should contain the kept (tail) items,
+// matching RetainedItems in content and length.
+func TestTruncatingCompactor_RetainedTailPopulated(t *testing.T) {
+	e := &HeuristicTokenEstimator{}
+	c := TruncatingCompactor{Estimator: e}
+	items := []memctx.TurnItem{
+		{Role: "user", Content: "这是一段很长的文本用于测试截断压缩，需要足够长才能触发截断逻辑"},
+		{Role: "assistant", Content: "另一段中等长度的回复文本"},
+		{Role: "user", Content: "短"},
+	}
+	maxTokens := 5 // 强制截断到很小的值
+	result, err := c.Compact(context.Background(), items, maxTokens)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	// RetainedTail should be non-empty after compaction.
+	if len(result.RetainedTail) == 0 {
+		t.Fatal("expected non-empty RetainedTail after truncation")
+	}
+
+	// RetainedTail length should match RetainedItems length.
+	if len(result.RetainedTail) != len(result.RetainedItems) {
+		t.Errorf("RetainedTail length %d != RetainedItems length %d",
+			len(result.RetainedTail), len(result.RetainedItems))
+	}
+
+	// RetainedTail content should match RetainedItems.
+	for i := range result.RetainedTail {
+		if result.RetainedTail[i].Content != result.RetainedItems[i].Content {
+			t.Errorf("RetainedTail[%d].Content = %q, want %q",
+				i, result.RetainedTail[i].Content, result.RetainedItems[i].Content)
+		}
+	}
+
+	// Verify RetainedTail is an independent copy (not aliasing RetainedItems).
+	result.RetainedTail[0].Content = "modified"
+	if result.RetainedItems[0].Content == "modified" {
+		t.Error("RetainedTail should be an independent copy, not alias RetainedItems")
+	}
+}

@@ -41,7 +41,7 @@ type SessionSink interface {
 	// Append 追加一条会话树条目（append-only，不修改历史）。
 	Append(ctx context.Context, entry SessionEntry) error
 	// LoadTree 从持久化存储加载完整会话树。
-	LoadTree(ctx context.Context, sessionID string) (*SessionTree, error)
+	LoadTree(ctx context.Context, sessionID string) (*SessionTreeData, error)
 	// Flush 强制刷盘。
 	Flush(ctx context.Context) error
 	// Close 释放资源。
@@ -58,8 +58,11 @@ type SessionEntry struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// SessionTree 是从 SessionSink 重建的完整会话树。
-type SessionTree struct {
+// SessionTreeData 是从 SessionSink 重建的完整会话树快照。
+//
+// 这是一个纯数据容器，由 SessionSink.LoadTree 返回。
+// 活跃的树管理（增删节点、分支导航）使用 SessionTree 类型。
+type SessionTreeData struct {
 	SessionID string
 	RootID string
 	Branches []BranchInfo

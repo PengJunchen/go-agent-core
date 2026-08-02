@@ -73,8 +73,8 @@ func (s *JSONLSessionSink) Append(ctx context.Context, entry SessionEntry) error
 }
 
 // LoadTree 从持久化文件重建指定会话的完整会话树。
-func (s *JSONLSessionSink) LoadTree(ctx context.Context, sessionID string) (*SessionTree, error) {
-	tree := &SessionTree{
+func (s *JSONLSessionSink) LoadTree(ctx context.Context, sessionID string) (*SessionTreeData, error) {
+	tree := &SessionTreeData{
 		SessionID: sessionID,
 		Branches: []BranchInfo{},
 		Entries: []SessionEntry{},

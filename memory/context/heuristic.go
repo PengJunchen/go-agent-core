@@ -13,28 +13,34 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/pengjunchen/go-agent-core/memory/session"
 )
 
 // HeuristicContextManager 是 ContextManager 的启发式默认实现。
 //
-// 按方案 C（Designer §2）持有 summaryCompactor + truncatingCompactor 双字段。
+// 按方案 C（Designer §2）持有 microCompactor + summaryCompactor + truncatingCompactor 三字段。
 // Compact 策略按如下方式分发：
+// - CompactMicro → microCompactor
 // - CompactSummary → summaryCompactor
 // - CompactTruncate → truncatingCompactor
-// - CompactAuto → 优先 summaryCompactor（若可用），超阈值回退 truncatingCompactor
+// - CompactAuto → 三级管线：先 microCompactor（零 LLM），再 truncatingCompactor（零 LLM），
+// 最后 summaryCompactor（LLM，仅在仍超阈值时）
 // - CompactManual → 先 summaryCompactor 再 truncatingCompactor（双重压缩）
 //
 // 字段：
 // - items：有序的所有 TurnItem 列表（初始上下文在前，后续条目追加）
 // - estimator：Token 估算器（默认 DefaultHeuristicEstimator，可替换）
+// - microCompactor：微压缩器（CompactMicro/CompactAuto 第一级用，零 LLM）
 // - summaryCompactor：摘要压缩器（nil 表示不可用）
-// - truncatingCompactor：截断压缩器（nil 表示不可用）
+// - truncatingCompactor：截断压缩器（nil 表示不可用，自动回退）
 // - maxTokens：触发压缩的 token 上限（0 表示不限制）
 // - mu：读写锁保证并发安全
 type HeuristicContextManager struct {
 	mu sync.RWMutex
 	items []TurnItem
 	estimator TokenEstimator
+	microCompactor Compactor // 微压缩器（CompactMicro/CompactAuto 第一级用，零 LLM）
 	summaryCompactor Compactor // 摘要压缩器（CompactSummary/CompactAuto 用）
 	truncatingCompactor Compactor // 截断压缩器（CompactTruncate 用，自动回退）
 	maxTokens int
@@ -50,10 +56,11 @@ func WithEstimator(e TokenEstimator) HeuristicContextManagerOption {
 	}
 }
 
-// WithCompactor 设置 Compactor（作为 summaryCompactor 和 truncatingCompactor 的快捷设置）。
-// 同时设置两个字段。为精细控制，请使用 WithSummaryCompactor 和 WithTruncatingCompactor。
+// WithCompactor 设置 Compactor（作为 microCompactor、summaryCompactor 和 truncatingCompactor 的快捷设置）。
+// 同时设置三个字段。为精细控制，请使用 WithMicroCompactor、WithSummaryCompactor 和 WithTruncatingCompactor。
 func WithCompactor(c Compactor) HeuristicContextManagerOption {
 	return func(m *HeuristicContextManager) {
+		m.microCompactor = c
 		m.summaryCompactor = c
 		m.truncatingCompactor = c
 	}
@@ -70,6 +77,13 @@ func WithSummaryCompactor(c Compactor) HeuristicContextManagerOption {
 func WithTruncatingCompactor(c Compactor) HeuristicContextManagerOption {
 	return func(m *HeuristicContextManager) {
 		m.truncatingCompactor = c
+	}
+}
+
+// WithMicroCompactor 设置微压缩器（用于 CompactMicro 策略和 CompactAuto 第一级）。
+func WithMicroCompactor(c Compactor) HeuristicContextManagerOption {
+	return func(m *HeuristicContextManager) {
+		m.microCompactor = c
 	}
 }
 
@@ -111,12 +125,13 @@ func (e DefaultHeuristicEstimator) EstimateFromItems(items []TurnItem) int {
 //
 // 默认行为：
 // - estimator：DefaultHeuristicEstimator（char/4 启发式估算）
+// - microCompactor：nil（微压缩需通过 WithMicroCompactor 或 WithCompactor 设置）
 // - summaryCompactor：nil（摘要压缩需通过 WithSummaryCompactor 或 WithCompactor 设置）
 // - truncatingCompactor：nil（截断压缩需通过 WithTruncatingCompactor 或 WithCompactor 设置）
 // - maxTokens：4096（默认触发压缩的阈值）
 //
-// 注：不默认注入 TruncatingCompactor，以避免 memory/compactor → memory/context 循环依赖。
-// 调用方负责通过 WithCompactor / WithSummaryCompactor / WithTruncatingCompactor 注入。
+// 注：不默认注入 Compactor，以避免 memory/compactor → memory/context 循环依赖。
+// 调用方负责通过 WithCompactor / WithMicroCompactor / WithSummaryCompactor / WithTruncatingCompactor 注入。
 func NewHeuristicContextManager(opts ...HeuristicContextManagerOption) *HeuristicContextManager {
 	m := &HeuristicContextManager{
 		items: make([]TurnItem, 0),
@@ -265,10 +280,12 @@ func (m *HeuristicContextManager) compactOrErr(ctx context.Context, c Compactor,
 // Compact 按策略压缩上下文。
 //
 // 策略行为（按 Designer §2 方案 C）：
+// - CompactMicro → 委托 microCompactor（零 LLM）
 // - CompactTruncate → 委托 truncatingCompactor
 // - CompactSummary → 委托 summaryCompactor
-// - CompactAuto → 若 currentTokens <= maxTokens 则 noop；
-// 否则先尝试 summaryCompactor，若结果仍超阈值则回退 truncatingCompactor
+// - CompactAuto → 三级管线：若 currentTokens <= maxTokens 则 noop；
+// 否则依次尝试 microCompactor（零 LLM）→ truncatingCompactor（零 LLM）→ summaryCompactor（LLM），
+// 每级若已降至阈值以下则提前返回
 // - CompactManual → 先 summaryCompactor（若可用），后 truncatingCompactor（双重压缩）
 //
 // 若无对应 Compactor 则返回 ErrNoCompactor。
@@ -289,6 +306,9 @@ func (m *HeuristicContextManager) Compact(ctx context.Context, strategy CompactS
 	}
 
 	switch strategy {
+	case CompactMicro:
+		return m.compactOrErr(ctx, m.microCompactor, strategy, limit)
+
 	case CompactTruncate:
 		return m.compactOrErr(ctx, m.truncatingCompactor, strategy, limit)
 
@@ -305,18 +325,62 @@ func (m *HeuristicContextManager) Compact(ctx context.Context, strategy CompactS
 				RetainedItems: m.items,
 			}, nil
 		}
-		// 优先尝试 summaryCompactor
-		if m.summaryCompactor != nil {
-			result, err := m.summaryCompactor.Compact(ctx, m.items, limit)
+
+		// 第一级：microCompactor（零 LLM）— 用占位符替换旧工具结果
+		if m.microCompactor != nil {
+			result, err := m.microCompactor.Compact(ctx, m.items, limit)
 			if err == nil && result.AfterTokens <= limit {
 				m.items = result.RetainedItems
 				result.Strategy = CompactAuto
-				logCompact(ctx, "auto", result)
+				logCompact(ctx, "auto/micro", result)
+				return result, nil
+			}
+			// micro 后仍超阈值，更新 items 继续下一级
+			if err == nil {
+				m.items = result.RetainedItems
+				currentTokens = result.AfterTokens
+			}
+		}
+
+		// 第二级：truncatingCompactor（零 LLM）— 截断最早条目
+		if m.truncatingCompactor != nil {
+			result, err := m.truncatingCompactor.Compact(ctx, m.items, limit)
+			if err == nil && result.AfterTokens <= limit {
+				m.items = result.RetainedItems
+				result.Strategy = CompactAuto
+				logCompact(ctx, "auto/truncate", result)
+				return result, nil
+			}
+			// truncate 后仍超阈值，更新 items 继续下一级
+			if err == nil {
+				m.items = result.RetainedItems
+				currentTokens = result.AfterTokens
+			}
+		}
+
+		// 第三级：summaryCompactor（LLM）— 仅在仍超阈值时调用
+		if m.summaryCompactor != nil {
+			result, err := m.summaryCompactor.Compact(ctx, m.items, limit)
+			if err == nil {
+				m.items = result.RetainedItems
+				result.Strategy = CompactAuto
+				logCompact(ctx, "auto/summary", result)
 				return result, nil
 			}
 		}
-		// 回退 truncatingCompactor
-		return m.compactOrErr(ctx, m.truncatingCompactor, CompactAuto, limit)
+
+		// 所有可用 compactor 均尝试过，以最后一次结果返回（若无则报错）
+		if m.microCompactor == nil && m.truncatingCompactor == nil && m.summaryCompactor == nil {
+			return nil, ErrNoCompactor
+		}
+		// 返回当前状态（可能已被前几级部分压缩）
+		return &CompactResult{
+			Strategy: CompactAuto,
+			BeforeTokens: m.estimator.EstimateFromItems(m.items),
+			AfterTokens: m.estimator.EstimateFromItems(m.items),
+			ItemsRemoved: 0,
+			RetainedItems: m.items,
+		}, nil
 
 	case CompactManual:
 		// 先 summaryCompactor（若可用）
@@ -362,6 +426,88 @@ func logCompact(ctx context.Context, strategy string, result *CompactResult) {
 		"removed", result.ItemsRemoved,
 		"total_items", len(result.RetainedItems),
 	)
+}
+
+// Clear removes all items from the context, resetting it to a fresh state.
+// The initial context (system prompt) is also cleared.
+func (m *HeuristicContextManager) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.items = make([]TurnItem, 0)
+}
+
+// compactionCheckpointKey is the metadata key used to store a compaction
+// checkpoint summary on a TreeNode.
+const compactionCheckpointKey = "compaction_checkpoint"
+
+// BuildContext reconstructs the context from a session tree.
+//
+// It walks backward from the active leaf node to the root, collecting TurnItems.
+// If a compaction checkpoint is encountered (TreeNode.Metadata["compaction_checkpoint"]),
+// the walk stops and the checkpoint's summary is used as the base.
+// The reconstructed context is: [checkpoint summary] + [items from checkpoint to leaf].
+// The manager's internal items list is replaced with the reconstructed context.
+func (m *HeuristicContextManager) BuildContext(tree *session.SessionTree) error {
+	activeID := tree.ActiveID()
+	if activeID == "" {
+		return fmt.Errorf("BuildContext: tree has no active node")
+	}
+
+	path, err := tree.GetBranchPath(activeID)
+	if err != nil {
+		return fmt.Errorf("BuildContext: %w", err)
+	}
+
+	if len(path) == 0 {
+		return fmt.Errorf("BuildContext: empty path to active node")
+	}
+
+	// Walk backward from leaf to root to find the nearest compaction checkpoint.
+	checkpointIdx := -1
+	var checkpointSummary string
+	for i := len(path) - 1; i >= 0; i-- {
+		node := path[i]
+		if node.Metadata != nil {
+			if summary, ok := node.Metadata[compactionCheckpointKey]; ok {
+				if s, ok := summary.(string); ok {
+					checkpointSummary = s
+					checkpointIdx = i
+					break
+				}
+			}
+		}
+	}
+
+	var newItems []TurnItem
+	if checkpointIdx >= 0 && checkpointSummary != "" {
+		// Checkpoint found: use summary as base, add items after checkpoint
+		newItems = append(newItems, TurnItem{
+			Role: "system",
+			Content: checkpointSummary,
+		})
+		for i := checkpointIdx + 1; i < len(path); i++ {
+			newItems = append(newItems, nodeToTurnItem(path[i]))
+		}
+	} else {
+		// No checkpoint: use all items from root to leaf
+		for i := 0; i < len(path); i++ {
+			newItems = append(newItems, nodeToTurnItem(path[i]))
+		}
+	}
+
+	m.mu.Lock()
+	m.items = newItems
+	m.mu.Unlock()
+
+	return nil
+}
+
+// nodeToTurnItem converts a session TreeNode to a context TurnItem.
+func nodeToTurnItem(node *session.TreeNode) TurnItem {
+	return TurnItem{
+		Role: node.Role,
+		Content: node.Content,
+	}
 }
 
 // initialCtxMarker is a sentinel value stored in TurnItem.Metadata to mark

@@ -42,6 +42,8 @@ const (
 	CompactTruncate CompactStrategy = "truncate"
 	// CompactSummary LLM 摘要压缩。
 	CompactSummary CompactStrategy = "summary"
+	// CompactMicro 微压缩：用占位符替换旧工具结果内容（零 LLM）。
+	CompactMicro CompactStrategy = "micro"
 )
 
 // CompactResult 是一次压缩的结果。
@@ -50,8 +52,9 @@ type CompactResult struct {
 	BeforeTokens int
 	AfterTokens int
 	ItemsRemoved int
-	Summary string
+	Summary string // optional summary of removed items
 	RetainedItems []TurnItem
+	RetainedTail []TurnItem // items preserved during compaction (for session tree)
 }
 
 // TurnItem 是上下文中的一个条目（消息/工具调用/工具结果等）。

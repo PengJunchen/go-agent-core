@@ -33,11 +33,16 @@ func (t TruncatingCompactor) Compact(c context.Context, items []memctx.TurnItem,
 	for len(kept) > 1 && est.EstimateFromItems(kept) > maxTokens {
 		kept = kept[1:]
 	}
+	// RetainedTail: the tail items that were explicitly preserved (not compacted away).
+	// For truncation this is the same set as RetainedItems since truncation keeps the tail.
+	retainedTail := make([]memctx.TurnItem, len(kept))
+	copy(retainedTail, kept)
 	return &memctx.CompactResult{
 		Strategy: memctx.CompactTruncate,
 		BeforeTokens: before,
 		AfterTokens: est.EstimateFromItems(kept),
 		ItemsRemoved: len(items) - len(kept),
 		RetainedItems: kept,
+		RetainedTail: retainedTail,
 	}, nil
 }
