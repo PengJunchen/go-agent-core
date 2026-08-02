@@ -154,13 +154,13 @@ var _ toolhook.ToolHook = (*ApprovalHook)(nil)
 //
 // 决策链：
 // 1. 缓存查找（IsApproved）→ 命中则直接返回
-// 2. 发射 EventApprovalRequest 事件
+// 2. 通过 EventEmitter 发射 EventApprovalRequest 事件
 // 3. 调用 HITLManager.RequestApproval
 // 4. 缓存决策（CacheDecision）
 // 5. 根据 Decision 返回 Block 或放行
 type ApprovalHook struct {
 	hitl *HITLManager
-	eventCh chan<- event.AgentEvent
+	emitter EventEmitter // 替代 eventCh，解耦事件发射
 	submissionID string
 	sessionID string
 	turnID string
@@ -174,12 +174,12 @@ type ApprovalHook struct {
 // NewApprovalHook 创建一个 ApprovalHook。
 //
 // hitl: HITL 管理器（必填）
-// eventCh: 事件通道，用于发射 EventApprovalRequest
+// emitter: 事件发射器，用于发射 EventApprovalRequest（可为 nil）
 // submissionID, sessionID, turnID: 事件标识
-func NewApprovalHook(hitl *HITLManager, eventCh chan<- event.AgentEvent, submissionID, sessionID, turnID string) *ApprovalHook {
+func NewApprovalHook(hitl *HITLManager, emitter EventEmitter, submissionID, sessionID, turnID string) *ApprovalHook {
 	return &ApprovalHook{
 		hitl: hitl,
-		eventCh: eventCh,
+		emitter: emitter,
 		submissionID: submissionID,
 		sessionID: sessionID,
 		turnID: turnID,
@@ -188,6 +188,14 @@ func NewApprovalHook(hitl *HITLManager, eventCh chan<- event.AgentEvent, submiss
 
 // Before 实现 ToolHook.Before — 在工具执行前请求审批。
 func (h *ApprovalHook) Before(ctx context.Context, call *toolhook.ToolCall) (*toolhook.BeforeResult, error) {
+	// nil HITL 防御：无审批处理器时默认拒绝，防止空指针 panic
+	if h.hitl == nil {
+		return &toolhook.BeforeResult{
+			Block: true,
+			Reason: "approval required but no HITL handler configured",
+		}, nil
+	}
+
 	// Step 1: 缓存查找
 	if decision, ok := h.hitl.IsApproved(call.Name); ok {
 		if decision == ApprovalApprove {
@@ -196,10 +204,9 @@ func (h *ApprovalHook) Before(ctx context.Context, call *toolhook.ToolCall) (*to
 		return &toolhook.BeforeResult{Block: true, Reason: "tool denied (cached)"}, nil
 	}
 
-	// Step 2: 发射 EventApprovalRequest 事件
-	if h.eventCh != nil {
-		select {
-		case h.eventCh <- event.AgentEvent{
+	// Step 2: 通过 EventEmitter 发射 EventApprovalRequest 事件
+	if h.emitter != nil {
+		h.emitter.Emit(event.AgentEvent{
 			Type: event.EventApprovalRequest,
 			SubmissionID: h.submissionID,
 			TurnID: h.turnID,
@@ -212,10 +219,7 @@ func (h *ApprovalHook) Before(ctx context.Context, call *toolhook.ToolCall) (*to
 				TurnID: call.TurnID,
 			},
 			Timestamp: time.Now().UnixMilli(),
-		}:
-		default:
-			// 通道满，丢弃事件
-		}
+		})
 	}
 
 	// Step 3: 请求审批

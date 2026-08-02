@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
@@ -136,7 +137,64 @@ func toEinoOptions(opts *provider.ChatOptions) []model.Option {
 		result = append(result, model.WithToolChoice(toEinoToolChoice(opts.ToolChoice)))
 	}
 
+	// GAP-1: ResponseFormat → OpenAI response_format via extra fields.
+	if opts.ResponseFormat != nil && opts.ResponseFormat.Type == provider.ConstrainedJSONSchema {
+		result = append(result, toResponseFormatOption(opts.ResponseFormat))
+	}
+
+	// GAP-2: ThinkingMode → OpenAI reasoning_effort.
+	if opts.ThinkingMode != nil && opts.ThinkingMode.Enabled {
+		result = append(result, toThinkingModeOption(opts.ThinkingMode))
+	}
+
 	return result
+}
+
+// toResponseFormatOption 将 provider.ResponseFormat 转换为 Eino model.Option。
+//
+// 仅支持 json_schema 模式，通过 OpenAI WithExtraFields 将 response_format
+// 注入请求体。grammar 模式需要 provider-specific 后端（如 llama.cpp GBNF），
+// 暂未实现。
+func toResponseFormatOption(rf *provider.ResponseFormat) model.Option {
+	rfMap := map[string]any{
+		"type": string(rf.Type),
+	}
+	if rf.JSONSchema != nil {
+		name := "response"
+		if n, ok := rf.JSONSchema["title"].(string); ok && n != "" {
+			name = n
+		}
+		rfMap["json_schema"] = map[string]any{
+			"name": name,
+			"schema": rf.JSONSchema,
+			"strict": true,
+		}
+	}
+	return openai.WithExtraFields(map[string]any{"response_format": rfMap})
+}
+
+// toThinkingModeOption 将 provider.ThinkingConfig 转换为 Eino model.Option。
+//
+// 将 Budget 映射到 OpenAI reasoning_effort 级别：
+// - Budget ≤ 4096 → low
+// - Budget ≤ 16384 → medium
+// - Budget > 16384 → high
+// - Budget == 0 → high（不限预算视为最大思考力度）
+//
+// TODO: Anthropic agentic model 的 extended thinking（budget_tokens）
+// 需在 agenticclaude 适配器集成后通过 impl-specific option 传递。
+func toThinkingModeOption(tc *provider.ThinkingConfig) model.Option {
+	effort := openai.ReasoningEffortLevelMedium
+	if tc.Budget > 0 {
+		if tc.Budget <= 4096 {
+			effort = openai.ReasoningEffortLevelLow
+		} else if tc.Budget > 16384 {
+			effort = openai.ReasoningEffortLevelHigh
+		}
+	} else {
+		effort = openai.ReasoningEffortLevelHigh
+	}
+	return openai.WithReasoningEffort(effort)
 }
 
 // toEinoToolInfos 将 []provider.ToolSpec 转换为 []*schema.ToolInfo。

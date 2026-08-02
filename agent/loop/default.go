@@ -95,6 +95,7 @@ type LoopAgentConfig struct {
 	CompactThreshold int // 触发自动压缩的 token 阈值（0 = 禁用）
 	PrepareNextTurn PrepareNextTurnFunc // 可选，nil 表示不启用运行时 Provider 切换
 	ProductionBundle *production.ProductionBundle // 可选，nil 表示不启用生产化组件
+	ToolExecutor *registry.ParallelToolExecutor // 可选，nil 表示串行执行
 }
 
 // ─── DefaultLoopAgent ────────────────────────────────────────────
@@ -126,6 +127,7 @@ type DefaultLoopAgent struct {
 	compactThreshold int
 	prepareNextTurn PrepareNextTurnFunc
 	productionBundle *production.ProductionBundle
+	toolExecutor *registry.ParallelToolExecutor
 
 	// 生成器（可替换）
 	generator LoopGenerator
@@ -261,6 +263,7 @@ func (a *DefaultLoopAgent) runLoop(ctx context.Context, input AgentInput, submis
 		Prompt: input.Prompt,
 		PrepareNextTurn: a.prepareNextTurn,
 		ProductionBundle: a.productionBundle,
+		ToolExecutor: a.toolExecutor,
 	}
 
 	result := a.generator.RunTurn(ctx, params, eventCh)

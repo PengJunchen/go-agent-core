@@ -189,9 +189,9 @@ func clampID(id string, clamp int) string {
 func supportsVision(targetProvider string) bool {
 	p := strings.ToLower(targetProvider)
 	switch {
-	case strings.HasPrefix(p, "anthropic"):
+	case strings.HasPrefix(p, ProviderNameAnthropic):
 		return true
-	case strings.HasPrefix(p, "openai"):
+	case strings.HasPrefix(p, ProviderNameOpenAI):
 		return true
 	default:
 		return false
@@ -240,7 +240,7 @@ func applyThinkingAdapter(msgs []message.Message, targetProvider string) {
 
 // isOpenAIProvider 判断是否为 OpenAI 系 provider。
 func isOpenAIProvider(targetProvider string) bool {
-	return strings.ToLower(targetProvider) == "openai"
+	return strings.ToLower(targetProvider) == ProviderNameOpenAI
 }
 
 // ========== 新增跨 Provider 转换函数 ==========
@@ -301,15 +301,26 @@ func isNumericID(s string) bool {
 	return true
 }
 
+// ─── Provider 名称常量 ─────────────────────────────────────────────
+// 这些常量用于 transform 层的 provider 能力检测，不是 Provider 路由。
+// Provider 路由必须通过 ProviderRegistry（SCAN-010）。
+const (
+	ProviderNameOpenAI = "openai"
+	ProviderNameAnthropic = "anthropic"
+	ProviderNameGemini = "gemini"
+	ProviderNameOllama = "ollama"
+	ProviderNameGroq = "groq"
+)
+
 // supportedImageTypes 列出各 provider 支持的图片 MIME 类型。
 // 未列出的 provider 视为不支持任何图片。
 var supportedImageTypes = map[string][]string{
-	"openai": {"image/png", "image/jpeg", "image/gif", "image/webp"},
-	"anthropic": {"image/png", "image/jpeg", "image/gif", "image/webp"},
+	ProviderNameOpenAI: {"image/png", "image/jpeg", "image/gif", "image/webp"},
+	ProviderNameAnthropic: {"image/png", "image/jpeg", "image/gif", "image/webp"},
 }
 
 // imageProviders 支持内联 base64 图片的 provider 前缀。
-var imageProviders = []string{"openai", "anthropic"}
+var imageProviders = []string{ProviderNameOpenAI, ProviderNameAnthropic}
 
 // ImageFormatAdapter 处理图片格式差异：
 // - 不支持图片的 provider：将图片替换为文本占位符
@@ -407,10 +418,10 @@ const (
 // classifyThinkingProvider 判断 provider 对思维块的约定。
 func classifyThinkingProvider(targetProvider string) thinkingProviderConvention {
 	p := strings.ToLower(targetProvider)
-	if p == "openai" {
+	if p == ProviderNameOpenAI {
 		return thinkingOpenAI
 	}
-	if strings.HasPrefix(p, "anthropic") {
+	if strings.HasPrefix(p, ProviderNameAnthropic) {
 		return thinkingAnthropic
 	}
 	return thinkingPassthrough
@@ -458,7 +469,7 @@ func applyThinkingBlockAdapterEnhanced(msgs []message.Message, targetProvider st
 }
 
 // systemMessageProviders 列出需要将系统消息合并到用户消息的 provider 前缀。
-var systemMessageProviders = []string{"ollama", "groq"}
+var systemMessageProviders = []string{ProviderNameOllama, ProviderNameGroq}
 
 // SystemMessageAdapter 归一化系统消息处理：
 // - 支持 system role 的 provider：保留原样；空系统消息被移除

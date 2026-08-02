@@ -12,6 +12,10 @@ import (
 
 // EinoEventStream 适配 Eino 的 StreamReader 到 stream.EventStream 接口。
 //
+// Deprecated: EinoProvider.StreamChat 已改用 pumpStream（直接返回
+// <-chan StreamEvent），EinoEventStream 不再被生产代码引用。
+// 保留此类型仅供测试和向后兼容，未来版本可能移除。
+//
 // 从 StreamReader 读取 []*schema.Message 并填充内部 buffer，逐条通过
 // Next() 或 Events() 通道消费。流结束后 Close() 释放底层资源。
 type EinoEventStream struct {
@@ -23,6 +27,7 @@ type EinoEventStream struct {
 }
 
 // NewEinoEventStream 构造 EinoEventStream。
+// Deprecated: 见 EinoEventStream 文档。
 func NewEinoEventStream(reader *schema.StreamReader[*schema.Message]) *EinoEventStream {
 	es := &EinoEventStream{
 		reader: reader,

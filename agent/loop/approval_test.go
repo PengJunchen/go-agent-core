@@ -330,7 +330,8 @@ func TestApprovalHook_EventApprovalRequest(t *testing.T) {
 	hitl := NewHITLManager(handler, 0)
 
 	eventCh := make(chan event.AgentEvent, 1)
-	hook := NewApprovalHook(hitl, eventCh, "sub-1", "sess-1", "turn-1")
+	emitter := NewChannelEmitter(eventCh)
+	hook := NewApprovalHook(hitl, emitter, "sub-1", "sess-1", "turn-1")
 
 	call := &toolhook.ToolCall{
 		ID: "tc-event",

@@ -23,6 +23,9 @@ const (
 	StreamError
 )
 
+// FinishReasonLength 表示流因达到 token 上限而截断。
+const FinishReasonLength = "length"
+
 // StreamEvent 是流中的一个事件。
 type StreamEvent struct {
 	Type StreamEventType
@@ -30,6 +33,7 @@ type StreamEvent struct {
 	Thinking string // StreamThinkingDelta 时为思维增量
 	ToolCall *ToolCall // StreamToolCall* 时非 nil
 	Error error // StreamError 时非 nil
+	FinishReason string // StreamDone 时为完成原因（如 "length"）
 }
 
 // ToolCall 描述一次模型发起的工具调用。

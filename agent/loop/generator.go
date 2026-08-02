@@ -11,17 +11,20 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand"
 	"time"
 
 	"github.com/pengjunchen/go-agent-core/agent/event"
 	"github.com/pengjunchen/go-agent-core/agent/middleware"
+	"github.com/pengjunchen/go-agent-core/capability/extension"
 	"github.com/pengjunchen/go-agent-core/capability/registry"
 	"github.com/pengjunchen/go-agent-core/capability/toolhook"
-	ctxpkg "github.com/pengjunchen/go-agent-core/memory/context"
-	"github.com/pengjunchen/go-agent-core/memory/log"
 	"github.com/pengjunchen/go-agent-core/llm/message"
 	"github.com/pengjunchen/go-agent-core/llm/provider"
 	"github.com/pengjunchen/go-agent-core/llm/stream"
+	"github.com/pengjunchen/go-agent-core/llm/transform"
+	ctxpkg "github.com/pengjunchen/go-agent-core/memory/context"
+	"github.com/pengjunchen/go-agent-core/memory/log"
 	"github.com/pengjunchen/go-agent-core/production"
 )
 
@@ -58,6 +61,11 @@ type TurnParams struct {
 	Prompt string
 	PrepareNextTurn PrepareNextTurnFunc // 可选，每次 Turn 前回调以动态替换 ModelProvider
 	ProductionBundle *production.ProductionBundle // 可选，nil 表示不启用生产化组件
+	ToolExecutor *registry.ParallelToolExecutor // 可选，nil 表示串行执行
+	ConvertToLlm ConvertToLlmCallback // 可选，nil 表示使用默认 turnItemsToMessages
+	MessageTransformer transform.MessageTransformer // 可选，nil 表示使用 DefaultTransformer 进行跨 provider 归一化
+	TransformContext TransformContextCallback // 可选，nil 表示不转换消息
+	ExtensionRunner *extension.ExtensionRunner // 可选，nil 表示不发射扩展事件（向后兼容）
 }
 
 // TurnResult 描述一次 Turn 的结束状态。
@@ -169,14 +177,84 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				Timestamp: time.Now().UnixMilli(),
 			})
 			emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("get messages: %w", err))
+			g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, err)
 			return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
 		}
 
-		// 转换 TurnItems → []message.Message
-		msgs := turnItemsToMessages(items)
+		// 转换 TurnItems → []message.Message（可配置回调）
+		var msgs []message.Message
+		if params.ConvertToLlm != nil {
+			msgs, err = params.ConvertToLlm(items)
+			if err != nil {
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventTurnEnd,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("convert to llm: %w", err))
+				g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, err)
+				return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+			}
+		} else {
+			msgs = turnItemsToMessages(items)
+		}
+
+		// MessageTransformer：跨 provider 消息归一化（ToolCallID 截断、图片降级、思维块适配等）
+		// 在 TransformContext 回调之前应用，确保用户回调可以进一步自定义
+		providerName := ""
+		if activeProvider != nil {
+			if mi := activeProvider.ModelInfo(); mi != nil {
+				providerName = mi.Provider
+			}
+		}
+		if params.MessageTransformer != nil {
+			msgs, err = params.MessageTransformer.Transform(ctx, msgs, providerName)
+		} else {
+			msgs, err = transform.NewDefaultTransformer().Transform(ctx, msgs, providerName)
+		}
+		if err != nil {
+			emitEvent(eventCh, event.AgentEvent{
+				Type: event.EventTurnEnd,
+				SubmissionID: params.SubmissionID,
+				TurnID: params.TurnID,
+				SessionID: params.SessionID,
+				Timestamp: time.Now().UnixMilli(),
+			})
+			emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("message transform: %w", err))
+			g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, err)
+			return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+		}
+
+		// TransformContext 回调：在发送给 LLM 前重写消息
+		if params.TransformContext != nil {
+			msgs, err = params.TransformContext(ctx, msgs)
+			if err != nil {
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventTurnEnd,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("transform context: %w", err))
+				g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, err)
+				return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+			}
+		}
 
 		// 构建工具列表
 		chatOpts := buildChatOptions(ctx, params.ToolRegistry)
+
+		// 扩展事件：BeforeProviderRequest
+		if earlyRet, replacePayload := g.checkExtensionEvent(eventCh, params.ExtensionRunner, extension.EventBeforeProviderRequest, params, turnCount, msgs); earlyRet != nil {
+			return earlyRet
+		} else if replacePayload != nil {
+			if replacedMsgs, ok := replacePayload.([]message.Message); ok {
+				msgs = replacedMsgs
+			}
+		}
 
 		// 记录 LLM 调用日志（调用前）
 		if params.Logger != nil {
@@ -210,6 +288,7 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				} else {
 					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("stream chat: %w", cbErr))
 				}
+				g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, cbErr)
 				return &TurnResult{Status: event.StatusError, Error: cbErr, TurnCount: turnCount}
 			}
 		} else {
@@ -224,7 +303,8 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 					Timestamp: time.Now().UnixMilli(),
 				})
 				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("stream chat: %w", chatErr))
-				return &TurnResult{Status: event.StatusError, Error: chatErr, TurnCount: turnCount}
+			g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, chatErr)
+			return &TurnResult{Status: event.StatusError, Error: chatErr, TurnCount: turnCount}
 			}
 		}
 
@@ -232,7 +312,17 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 		var toolCalls []stream.ToolCall
 		var textContent string
 		var thinkingContent string
+		var finishReason string
 		streamDone := false
+
+		// 发射消息开始事件（LLM 响应开始）
+		emitEvent(eventCh, event.AgentEvent{
+			Type: event.EventMessageStart,
+			SubmissionID: params.SubmissionID,
+			TurnID: params.TurnID,
+			SessionID: params.SessionID,
+			Timestamp: time.Now().UnixMilli(),
+		})
 
 		for streamEvt := range streamCh {
 			switch streamEvt.Type {
@@ -247,6 +337,17 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 					Timestamp: time.Now().UnixMilli(),
 				}
 				emitEvent(eventCh, evt)
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventMessageUpdate,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Payload: event.MessageUpdatePayload{
+						Type: event.MessageUpdateText,
+						Content: streamEvt.Content,
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
 				if params.Logger != nil {
 					params.Logger.LogEvent(ctx, log.NewEventRecord("text_delta", params.SessionID, params.TurnID))
 				}
@@ -262,6 +363,17 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 					Timestamp: time.Now().UnixMilli(),
 				}
 				emitEvent(eventCh, evt)
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventMessageUpdate,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Payload: event.MessageUpdatePayload{
+						Type: event.MessageUpdateThinking,
+						Content: streamEvt.Thinking,
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
 				if params.Logger != nil {
 					params.Logger.LogEvent(ctx, log.NewEventRecord("thinking_delta", params.SessionID, params.TurnID))
 				}
@@ -297,6 +409,9 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				})
 
 			case stream.StreamDone:
+				if streamEvt.FinishReason != "" {
+					finishReason = streamEvt.FinishReason
+				}
 				streamDone = true
 
 			case stream.StreamError:
@@ -311,6 +426,7 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				if errors.Is(streamEvt.Error, context.Canceled) || errors.Is(streamEvt.Error, context.DeadlineExceeded) {
 					return &TurnResult{Status: event.StatusCanceled, Error: streamEvt.Error, TurnCount: turnCount}
 				}
+				g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, streamEvt.Error)
 				return &TurnResult{Status: event.StatusError, Error: streamEvt.Error, TurnCount: turnCount}
 			}
 
@@ -354,6 +470,41 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 		default:
 		}
 
+		// 扩展事件：AfterProviderResponse
+		extResponsePayload := map[string]any{
+			"text": textContent,
+			"thinking": thinkingContent,
+			"tool_calls": toolCalls,
+			"finish_reason": finishReason,
+		}
+		if earlyRet, replacePayload := g.checkExtensionEvent(eventCh, params.ExtensionRunner, extension.EventAfterProviderResponse, params, turnCount, extResponsePayload); earlyRet != nil {
+			return earlyRet
+		} else if replacePayload != nil {
+			if replaced, ok := replacePayload.(map[string]any); ok {
+				if t, ok := replaced["text"].(string); ok {
+					textContent = t
+				}
+				if t, ok := replaced["thinking"].(string); ok {
+					thinkingContent = t
+				}
+				if tc, ok := replaced["tool_calls"].([]stream.ToolCall); ok {
+					toolCalls = tc
+				}
+				if fr, ok := replaced["finish_reason"].(string); ok {
+					finishReason = fr
+				}
+			}
+		}
+
+		// 发射消息结束事件（LLM 响应完成，工具调用前）
+		emitEvent(eventCh, event.AgentEvent{
+			Type: event.EventMessageEnd,
+			SubmissionID: params.SubmissionID,
+			TurnID: params.TurnID,
+			SessionID: params.SessionID,
+			Timestamp: time.Now().UnixMilli(),
+		})
+
 		// 记录助手消息到上下文
 		assistantItem := ctxpkg.TurnItem{
 			Role: string(message.RoleAssistant),
@@ -380,7 +531,8 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				Timestamp: time.Now().UnixMilli(),
 			})
 			emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record assistant message: %w", err))
-			return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+		g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, err)
+		return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
 		}
 
 		// 没有工具调用 → 退出循环
@@ -395,281 +547,49 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 			break
 		}
 
-		// 执行工具调用
-		shouldTerminate := false
-		for _, tc := range toolCalls {
-			select {
-			case <-ctx.Done():
-				emitEvent(eventCh, event.AgentEvent{
-					Type: event.EventTurnEnd,
-					SubmissionID: params.SubmissionID,
-					TurnID: params.TurnID,
-					SessionID: params.SessionID,
-					Timestamp: time.Now().UnixMilli(),
-				})
-				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, ctx.Err())
-				return &TurnResult{Status: event.StatusCanceled, Error: ctx.Err(), TurnCount: turnCount}
-			default:
-			}
-
-			// 转换为 toolhook.ToolCall
-			hookCall := &toolhook.ToolCall{
-				ID: tc.ID,
-				Name: tc.Name,
-				Arguments: tc.Arguments,
-				SessionID: params.SessionID,
-				TurnID: params.TurnID,
-			}
-
-			// 执行 Before 钩子
-			if params.HookPipeline != nil {
-				beforeResult, err := params.HookPipeline.Before(ctx, hookCall)
-				if err != nil {
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventTurnEnd,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Timestamp: time.Now().UnixMilli(),
-					})
-					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("hook before: %w", err))
-					return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
-				}
-				if beforeResult.Block {
-					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("tool call blocked: %s", beforeResult.Reason))
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventToolCallResult,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Payload: &registry.ToolResult{
-							Content: fmt.Sprintf("tool call blocked: %s", beforeResult.Reason),
-							IsError: true,
-						},
-						Timestamp: time.Now().UnixMilli(),
-					})
-					continue
-				}
-				if beforeResult.Terminate {
-					shouldTerminate = true
-					break
-				}
-				if beforeResult.ModifiedCall != nil {
-					hookCall = beforeResult.ModifiedCall
-				}
-			}
-
-			// 安全守卫校验
-			if params.ProductionBundle != nil && params.ProductionBundle.SecurityGuard != nil {
-				secDecision, secErr := params.ProductionBundle.SecurityGuard.ValidateToolCall(ctx, production.SecurityCallInfo{
-					ToolName: hookCall.Name,
-					Arguments: hookCall.Arguments,
-					SessionID: params.SessionID,
-				})
-				if secErr != nil {
-					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("security guard error: %w", secErr))
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventToolCallResult,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Payload: &registry.ToolResult{
-							Content: fmt.Sprintf("security validation error: %v", secErr),
-							IsError: true,
-						},
-						Timestamp: time.Now().UnixMilli(),
-					})
-					continue
-				}
-				if !secDecision.Allowed {
-					reason := secDecision.Reason
-					if reason == "" {
-						reason = "blocked by security policy"
-					}
-					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("tool call blocked by security: %s", reason))
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventToolCallResult,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Payload: &registry.ToolResult{
-							Content: fmt.Sprintf("tool call blocked by security: %s", reason),
-							IsError: true,
-						},
-						Timestamp: time.Now().UnixMilli(),
-					})
-					continue
-				}
-			}
-
-			// 幂等键检查
-			if params.ProductionBundle != nil && params.ProductionBundle.IdempotencyKey != nil {
-				idemKey := fmt.Sprintf("%s:%v", hookCall.Name, hookCall.Arguments)
-				rec, found, idemErr := params.ProductionBundle.IdempotencyKey.Check(ctx, idemKey)
-				if idemErr != nil {
-					slog.Warn("idempotency check failed, proceeding with execution", "error", idemErr)
-				} else if found && rec != nil {
-					// Return cached result
-					cachedResult := &registry.ToolResult{
-						Content: fmt.Sprintf("%v", rec.Result),
-					}
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventToolCallResult,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Payload: cachedResult,
-						Timestamp: time.Now().UnixMilli(),
-					})
-					if err := params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{
-						Role: string(message.RoleTool),
-						Content: cachedResult.Content,
-						ToolCallID: hookCall.ID,
-						ToolName: hookCall.Name,
-						Metadata: map[string]any{"is_error": false, "idempotency_cached": true},
-					}); err != nil {
-						emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record idempotency result: %w", err))
-					}
-					continue
-				}
-			}
-
-			// 执行工具
-			var toolResult *registry.ToolResult
-			toolDef, err := params.ToolRegistry.GetTool(ctx, hookCall.Name)
-			if err != nil {
-				toolResult = &registry.ToolResult{
-					Content: fmt.Sprintf("tool not found: %s", hookCall.Name),
+		// StopLength 截断保护：如果响应因 token 上限被截断，工具调用参数可能不完整，
+		// 跳过工具执行并为每个工具调用记录错误结果，让 LLM 在下一轮重试。
+		if finishReason == stream.FinishReasonLength && len(toolCalls) > 0 {
+			for _, tc := range toolCalls {
+				errResult := &registry.ToolResult{
+					Content: "tool call skipped: response was truncated due to length limit",
 					IsError: true,
 				}
-			} else {
-				toolResult, err = toolDef.Handler(ctx, hookCall.Arguments)
-				if err != nil {
-					toolResult = &registry.ToolResult{
-						Content: err.Error(),
-						IsError: true,
-					}
-				}
-			}
-
-			// 执行 After 钩子
-			hookResult := &toolhook.ToolResult{
-				Content: toolResult.Content,
-				IsError: toolResult.IsError,
-				Details: toolResult.Details,
-				Metadata: make(map[string]any),
-			}
-			if params.HookPipeline != nil {
-				afterResult, err := params.HookPipeline.After(ctx, hookCall, hookResult)
-				if err != nil {
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventTurnEnd,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Timestamp: time.Now().UnixMilli(),
-					})
-					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("hook after: %w", err))
-					return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
-				}
-				if afterResult.Terminate {
-					shouldTerminate = true
-				}
-				if afterResult.ModifiedResult != nil {
-					hookResult = afterResult.ModifiedResult
-				}
-			}
-
-			// 发射 EventToolCallResult
-			emitResult := &registry.ToolResult{
-				Content: hookResult.Content,
-				IsError: hookResult.IsError,
-				Details: hookResult.Details,
-			}
-			emitEvent(eventCh, event.AgentEvent{
-				Type: event.EventToolCallResult,
-				SubmissionID: params.SubmissionID,
-				TurnID: params.TurnID,
-				SessionID: params.SessionID,
-				Payload: emitResult,
-				Timestamp: time.Now().UnixMilli(),
-			})
-
-			// 记录工具结果到上下文
-			if err := params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{
-				Role: string(message.RoleTool),
-				Content: hookResult.Content,
-				ToolCallID: hookCall.ID,
-				ToolName: hookCall.Name,
-				Metadata: map[string]any{
-					"is_error": hookResult.IsError,
-				},
-			}); err != nil {
 				emitEvent(eventCh, event.AgentEvent{
-					Type: event.EventTurnEnd,
+					Type: event.EventToolCallResult,
 					SubmissionID: params.SubmissionID,
 					TurnID: params.TurnID,
 					SessionID: params.SessionID,
+					Payload: errResult,
 					Timestamp: time.Now().UnixMilli(),
 				})
-				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record tool result: %w", err))
-				return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
-			}
-
-			// 自动压缩检查
-			if params.CompactThreshold > 0 {
-				usage := params.ContextManager.TokenUsage(ctx)
-				if usage > params.CompactThreshold {
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventCompactStart,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Timestamp: time.Now().UnixMilli(),
-					})
-					_, compactErr := params.ContextManager.Compact(ctx, ctxpkg.CompactAuto)
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventCompactEnd,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Timestamp: time.Now().UnixMilli(),
-					})
-					if compactErr != nil {
-						slog.Warn("auto-compact failed", "error", compactErr)
-					}
+				if err := params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{
+					Role: string(message.RoleTool),
+					Content: errResult.Content,
+					ToolCallID: tc.ID,
+					ToolName: tc.Name,
+					Metadata: map[string]any{"is_error": true},
+				}); err != nil {
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record truncated tool result: %w", err))
 				}
 			}
+			turnCount++
+			continue
+		}
 
-			// 记录 Item 日志
-			if params.Logger != nil {
-				rec := log.NewItemRecord("tool_call", params.SessionID, params.TurnID)
-				rec.ToolName = hookCall.Name
-				rec.Input = hookCall.Arguments
-				rec.Output = hookResult.Content
-				if hookResult.IsError {
-					rec.Error = hookResult.Content
-				}
-				params.Logger.LogItem(ctx, rec)
+		// 执行工具调用
+		shouldTerminate := false
+		if params.ToolExecutor != nil && len(toolCalls) > 1 {
+			// ─── 并行执行路径 ───
+			var parallelResult *TurnResult
+			shouldTerminate, parallelResult = g.executeToolsParallel(ctx, params, eventCh, toolCalls, turnCount)
+			if parallelResult != nil {
+				return parallelResult
 			}
-
-			// 循环检测
-			if params.ProductionBundle != nil && params.ProductionBundle.LoopDetector != nil {
-				_ = params.ProductionBundle.LoopDetector.Record(ctx, production.ToolCallRecord{ // 循环检测记录失败不影响工具执行
-					ToolName: hookCall.Name,
-					Arguments: hookCall.Arguments,
-					Timestamp: time.Now(),
-				})
-				if params.ProductionBundle.LoopDetector.IsLoop(ctx) {
-					emitEvent(eventCh, event.AgentEvent{
-						Type: event.EventToolLoopDetected,
-						SubmissionID: params.SubmissionID,
-						TurnID: params.TurnID,
-						SessionID: params.SessionID,
-						Payload: hookCall.Name,
-						Timestamp: time.Now().UnixMilli(),
-					})
-					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("loop detected: tool %q called consecutively", hookCall.Name))
+		} else {
+			for _, tc := range toolCalls {
+				select {
+				case <-ctx.Done():
 					emitEvent(eventCh, event.AgentEvent{
 						Type: event.EventTurnEnd,
 						SubmissionID: params.SubmissionID,
@@ -677,27 +597,299 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 						SessionID: params.SessionID,
 						Timestamp: time.Now().UnixMilli(),
 					})
-					return &TurnResult{Status: event.StatusError, Error: fmt.Errorf("loop detected: tool %q called consecutively", hookCall.Name), TurnCount: turnCount}
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, ctx.Err())
+					return &TurnResult{Status: event.StatusCanceled, Error: ctx.Err(), TurnCount: turnCount}
+				default:
 				}
-			}
 
-			// 审计日志
-			if params.ProductionBundle != nil && params.ProductionBundle.AuditLogger != nil {
-				_ = params.ProductionBundle.AuditLogger.LogToolCall(ctx, production.AuditToolCallEvent{ // 审计日志记录失败不影响工具执行
-					Timestamp: time.Now(),
+				// 转换为 toolhook.ToolCall
+				hookCall := &toolhook.ToolCall{
+					ID: tc.ID,
+					Name: tc.Name,
+					Arguments: tc.Arguments,
 					SessionID: params.SessionID,
-					ToolName: hookCall.Name,
-					Arguments: hookCall.Arguments,
-					Result: hookResult.Content,
-					Approved: true, // If we got here, the call was approved (not blocked)
-					DecisionBy: "auto",
-				})
-			}
+					TurnID: params.TurnID,
+				}
 
-			// 幂等键记录
-			if params.ProductionBundle != nil && params.ProductionBundle.IdempotencyKey != nil {
-				idemKey := fmt.Sprintf("%s:%v", hookCall.Name, hookCall.Arguments)
-				_ = params.ProductionBundle.IdempotencyKey.Record(ctx, idemKey, hookResult.Content) // 幂等记录失败不影响工具执行
+				// 执行 Before 钩子
+				if params.HookPipeline != nil {
+					beforeResult, err := params.HookPipeline.Before(ctx, hookCall)
+					if err != nil {
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventTurnEnd,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Timestamp: time.Now().UnixMilli(),
+						})
+						emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("hook before: %w", err))
+						return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+					}
+					if beforeResult.Block {
+						emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("tool call blocked: %s", beforeResult.Reason))
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventToolCallResult,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Payload: &registry.ToolResult{
+								Content: fmt.Sprintf("tool call blocked: %s", beforeResult.Reason),
+								IsError: true,
+							},
+							Timestamp: time.Now().UnixMilli(),
+						})
+						continue
+					}
+					if beforeResult.Terminate {
+						shouldTerminate = true
+						break
+					}
+					if beforeResult.ModifiedCall != nil {
+						hookCall = beforeResult.ModifiedCall
+					}
+				}
+
+				// 安全守卫校验
+				if params.ProductionBundle != nil && params.ProductionBundle.SecurityGuard != nil {
+					secDecision, secErr := params.ProductionBundle.SecurityGuard.ValidateToolCall(ctx, production.SecurityCallInfo{
+						ToolName: hookCall.Name,
+						Arguments: hookCall.Arguments,
+						SessionID: params.SessionID,
+					})
+					if secErr != nil {
+						emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("security guard error: %w", secErr))
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventToolCallResult,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Payload: &registry.ToolResult{
+								Content: fmt.Sprintf("security validation error: %v", secErr),
+								IsError: true,
+							},
+							Timestamp: time.Now().UnixMilli(),
+						})
+						continue
+					}
+					if !secDecision.Allowed {
+						reason := secDecision.Reason
+						if reason == "" {
+							reason = "blocked by security policy"
+						}
+						emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("tool call blocked by security: %s", reason))
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventToolCallResult,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Payload: &registry.ToolResult{
+								Content: fmt.Sprintf("tool call blocked by security: %s", reason),
+								IsError: true,
+							},
+							Timestamp: time.Now().UnixMilli(),
+						})
+						continue
+					}
+				}
+
+				// 幂等键检查
+				if params.ProductionBundle != nil && params.ProductionBundle.IdempotencyKey != nil {
+					idemKey := fmt.Sprintf("%s:%v", hookCall.Name, hookCall.Arguments)
+					rec, found, idemErr := params.ProductionBundle.IdempotencyKey.Check(ctx, idemKey)
+					if idemErr != nil {
+						slog.Warn("idempotency check failed, proceeding with execution", "error", idemErr)
+					} else if found && rec != nil {
+						// Return cached result
+						cachedResult := &registry.ToolResult{
+							Content: fmt.Sprintf("%v", rec.Result),
+						}
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventToolCallResult,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Payload: cachedResult,
+							Timestamp: time.Now().UnixMilli(),
+						})
+						if err := params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{
+							Role: string(message.RoleTool),
+							Content: cachedResult.Content,
+							ToolCallID: hookCall.ID,
+							ToolName: hookCall.Name,
+							Metadata: map[string]any{"is_error": false, "idempotency_cached": true},
+						}); err != nil {
+							emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record idempotency result: %w", err))
+						}
+						continue
+					}
+				}
+
+				// 执行工具
+				var toolResult *registry.ToolResult
+				toolDef, err := params.ToolRegistry.GetTool(ctx, hookCall.Name)
+				if err != nil {
+					toolResult = &registry.ToolResult{
+						Content: fmt.Sprintf("tool not found: %s", hookCall.Name),
+						IsError: true,
+					}
+				} else {
+					toolResult, err = toolDef.Handler(ctx, hookCall.Arguments)
+					if err != nil {
+						toolResult = &registry.ToolResult{
+							Content: err.Error(),
+							IsError: true,
+						}
+					}
+				}
+
+				// 执行 After 钩子
+				hookResult := &toolhook.ToolResult{
+					Content: toolResult.Content,
+					IsError: toolResult.IsError,
+					Details: toolResult.Details,
+					Metadata: make(map[string]any),
+				}
+				if params.HookPipeline != nil {
+					afterResult, err := params.HookPipeline.After(ctx, hookCall, hookResult)
+					if err != nil {
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventTurnEnd,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Timestamp: time.Now().UnixMilli(),
+						})
+						emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("hook after: %w", err))
+						return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+					}
+					if afterResult.Terminate {
+						shouldTerminate = true
+					}
+					if afterResult.ModifiedResult != nil {
+						hookResult = afterResult.ModifiedResult
+					}
+				}
+
+				// 发射 EventToolCallResult
+				emitResult := &registry.ToolResult{
+					Content: hookResult.Content,
+					IsError: hookResult.IsError,
+					Details: hookResult.Details,
+				}
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventToolCallResult,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Payload: emitResult,
+					Timestamp: time.Now().UnixMilli(),
+				})
+
+				// 记录工具结果到上下文
+				if err := params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{
+					Role: string(message.RoleTool),
+					Content: hookResult.Content,
+					ToolCallID: hookCall.ID,
+					ToolName: hookCall.Name,
+					Metadata: map[string]any{
+						"is_error": hookResult.IsError,
+					},
+				}); err != nil {
+					emitEvent(eventCh, event.AgentEvent{
+						Type: event.EventTurnEnd,
+						SubmissionID: params.SubmissionID,
+						TurnID: params.TurnID,
+						SessionID: params.SessionID,
+						Timestamp: time.Now().UnixMilli(),
+					})
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record tool result: %w", err))
+					return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+				}
+
+				// 自动压缩检查
+				if params.CompactThreshold > 0 {
+					usage := params.ContextManager.TokenUsage(ctx)
+					if usage > params.CompactThreshold {
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventCompactStart,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Timestamp: time.Now().UnixMilli(),
+						})
+						_, compactErr := params.ContextManager.Compact(ctx, ctxpkg.CompactAuto)
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventCompactEnd,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Timestamp: time.Now().UnixMilli(),
+						})
+						if compactErr != nil {
+							slog.Warn("auto-compact failed", "error", compactErr)
+						}
+					}
+				}
+
+				// 记录 Item 日志
+				if params.Logger != nil {
+					rec := log.NewItemRecord("tool_call", params.SessionID, params.TurnID)
+					rec.ToolName = hookCall.Name
+					rec.Input = hookCall.Arguments
+					rec.Output = hookResult.Content
+					if hookResult.IsError {
+						rec.Error = hookResult.Content
+					}
+					params.Logger.LogItem(ctx, rec)
+				}
+
+				// 循环检测
+				if params.ProductionBundle != nil && params.ProductionBundle.LoopDetector != nil {
+					_ = params.ProductionBundle.LoopDetector.Record(ctx, production.ToolCallRecord{ // 循环检测记录失败不影响工具执行
+						ToolName: hookCall.Name,
+						Arguments: hookCall.Arguments,
+						Timestamp: time.Now(),
+					})
+					if params.ProductionBundle.LoopDetector.IsLoop(ctx) {
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventToolLoopDetected,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Payload: hookCall.Name,
+							Timestamp: time.Now().UnixMilli(),
+						})
+						// 调用 forceTextReply 生成文本摘要，而非直接报错退出
+						g.forceTextReply(ctx, params, eventCh, hookCall.Name)
+						emitEvent(eventCh, event.AgentEvent{
+							Type: event.EventTurnEnd,
+							SubmissionID: params.SubmissionID,
+							TurnID: params.TurnID,
+							SessionID: params.SessionID,
+							Timestamp: time.Now().UnixMilli(),
+						})
+						return &TurnResult{Status: event.StatusCompleted, TurnCount: turnCount}
+					}
+				}
+
+				// 审计日志
+				if params.ProductionBundle != nil && params.ProductionBundle.AuditLogger != nil {
+					_ = params.ProductionBundle.AuditLogger.LogToolCall(ctx, production.AuditToolCallEvent{ // 审计日志记录失败不影响工具执行
+						Timestamp: time.Now(),
+						SessionID: params.SessionID,
+						ToolName: hookCall.Name,
+						Arguments: hookCall.Arguments,
+						Result: hookResult.Content,
+						Approved: true, // If we got here, the call was approved (not blocked)
+						DecisionBy: "auto",
+					})
+				}
+
+				// 幂等键记录
+				if params.ProductionBundle != nil && params.ProductionBundle.IdempotencyKey != nil {
+					idemKey := fmt.Sprintf("%s:%v", hookCall.Name, hookCall.Arguments)
+					_ = params.ProductionBundle.IdempotencyKey.Record(ctx, idemKey, hookResult.Content) // 幂等记录失败不影响工具执行
+				}
 			}
 		}
 
@@ -736,6 +928,437 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 	}
 
 	return &TurnResult{Status: event.StatusCompleted, TurnCount: turnCount}
+}
+
+// synthesizeFailureMessage 合成一条助手消息来解释失败，记录到上下文管理器并发射到事件流。
+// 用于可恢复错误的返回路径，使用户看到解释而非原始错误。
+func (g *DefaultLoopGenerator) synthesizeFailureMessage(ctx context.Context, params *TurnParams, eventCh chan<- event.AgentEvent, turnCount int, runErr error) {
+	// 合成一条解释失败的助手消息
+	msg := fmt.Sprintf("I encountered an error while processing your request: %v. Please try rephrasing your request or try again.", runErr)
+
+	// 记录合成消息到上下文
+	_ = params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{ // 合成消息记录失败不影响错误返回路径
+		Role: string(message.RoleAssistant),
+		Content: msg,
+		Metadata: map[string]any{
+			"synthesized": true,
+			"error": runErr.Error(),
+		},
+	})
+
+	// 发射文本到事件流，使用户看到解释
+	emitEvent(eventCh, event.AgentEvent{
+		Type: event.EventTextDelta,
+		SubmissionID: params.SubmissionID,
+		TurnID: params.TurnID,
+		SessionID: params.SessionID,
+		Payload: msg,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	emitEvent(eventCh, event.AgentEvent{
+		Type: event.EventMessageUpdate,
+		SubmissionID: params.SubmissionID,
+		TurnID: params.TurnID,
+		SessionID: params.SessionID,
+		Payload: event.MessageUpdatePayload{
+			Type: event.MessageUpdateText,
+			Content: msg,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+// checkExtensionEvent 发射扩展事件并处理结果。
+// 返回 earlyReturn 非 nil 时表示应立即返回 RunTurn（Block/Cancel）。
+// 返回 replacement 非 nil 时表示事件监听器提供了替换数据。
+func (g *DefaultLoopGenerator) checkExtensionEvent(
+	eventCh chan<- event.AgentEvent,
+	runner *extension.ExtensionRunner,
+	evtType extension.EventType,
+	params *TurnParams,
+	turnCount int,
+	payload any,
+) (earlyReturn *TurnResult, replacement any) {
+	if runner == nil {
+		return nil, nil
+	}
+	result := runner.EmitEvent(extension.Event{
+		Type: evtType,
+		SessionID: params.SessionID,
+		TurnID: params.TurnID,
+		Payload: payload,
+	})
+	if result == nil {
+		return nil, nil
+	}
+	switch result.Action {
+	case extension.EventActionBlock:
+		emitEvent(eventCh, event.AgentEvent{
+			Type: event.EventTurnEnd,
+			SubmissionID: params.SubmissionID,
+			TurnID: params.TurnID,
+			SessionID: params.SessionID,
+			Timestamp: time.Now().UnixMilli(),
+		})
+		err := fmt.Errorf("extension blocked: %s", result.Reason)
+		emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, err)
+		return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}, nil
+	case extension.EventActionCancel:
+		emitEvent(eventCh, event.AgentEvent{
+			Type: event.EventTurnEnd,
+			SubmissionID: params.SubmissionID,
+			TurnID: params.TurnID,
+			SessionID: params.SessionID,
+			Timestamp: time.Now().UnixMilli(),
+		})
+		return &TurnResult{Status: event.StatusCanceled, Error: context.Canceled, TurnCount: turnCount}, nil
+	case extension.EventActionReplace:
+		return nil, result.Replace
+	}
+	return nil, nil
+}
+
+// ─── 并行执行路径 ─────────────────────────────────────────────────
+
+// executeToolsParallel 在配置了 ToolExecutor 时并行执行工具调用。
+// 采用三阶段方法：
+// - Phase 1：串行预检查（Before hooks + SecurityGuard + 幂等检查）
+// - Phase 2：并行执行通过预检查的调用
+// - Phase 3：串行后处理（After hooks + 记录 + 检测）
+//
+// 返回 (shouldTerminate, earlyReturn)。当 earlyReturn 非 nil 时，调用方应立即返回该结果。
+func (g *DefaultLoopGenerator) executeToolsParallel(
+	ctx context.Context,
+	params *TurnParams,
+	eventCh chan<- event.AgentEvent,
+	toolCalls []stream.ToolCall,
+	turnCount int,
+) (bool, *TurnResult) {
+	// Phase 1: 串行预检查
+	var passableCalls []registry.ToolCall
+	var passableHookCalls []*toolhook.ToolCall
+	shouldTerminate := false
+
+	for _, tc := range toolCalls {
+		select {
+		case <-ctx.Done():
+			emitEvent(eventCh, event.AgentEvent{
+				Type: event.EventTurnEnd,
+				SubmissionID: params.SubmissionID,
+				TurnID: params.TurnID,
+				SessionID: params.SessionID,
+				Timestamp: time.Now().UnixMilli(),
+			})
+			emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, ctx.Err())
+			return false, &TurnResult{Status: event.StatusCanceled, Error: ctx.Err(), TurnCount: turnCount}
+		default:
+		}
+
+		hookCall := &toolhook.ToolCall{
+			ID: tc.ID,
+			Name: tc.Name,
+			Arguments: tc.Arguments,
+			SessionID: params.SessionID,
+			TurnID: params.TurnID,
+		}
+
+		// Before 钩子
+		if params.HookPipeline != nil {
+			beforeResult, err := params.HookPipeline.Before(ctx, hookCall)
+			if err != nil {
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventTurnEnd,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("hook before: %w", err))
+				return false, &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+			}
+			if beforeResult.Block {
+				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("tool call blocked: %s", beforeResult.Reason))
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventToolCallResult,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Payload: &registry.ToolResult{
+						Content: fmt.Sprintf("tool call blocked: %s", beforeResult.Reason),
+						IsError: true,
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
+				continue
+			}
+			if beforeResult.Terminate {
+				shouldTerminate = true
+				break
+			}
+			if beforeResult.ModifiedCall != nil {
+				hookCall = beforeResult.ModifiedCall
+			}
+		}
+
+		// 安全守卫校验
+		if params.ProductionBundle != nil && params.ProductionBundle.SecurityGuard != nil {
+			secDecision, secErr := params.ProductionBundle.SecurityGuard.ValidateToolCall(ctx, production.SecurityCallInfo{
+				ToolName: hookCall.Name,
+				Arguments: hookCall.Arguments,
+				SessionID: params.SessionID,
+			})
+			if secErr != nil {
+				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("security guard error: %w", secErr))
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventToolCallResult,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Payload: &registry.ToolResult{
+						Content: fmt.Sprintf("security validation error: %v", secErr),
+						IsError: true,
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
+				continue
+			}
+			if !secDecision.Allowed {
+				reason := secDecision.Reason
+				if reason == "" {
+					reason = "blocked by security policy"
+				}
+				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("tool call blocked by security: %s", reason))
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventToolCallResult,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Payload: &registry.ToolResult{
+						Content: fmt.Sprintf("tool call blocked by security: %s", reason),
+						IsError: true,
+					},
+					Timestamp: time.Now().UnixMilli(),
+				})
+				continue
+			}
+		}
+
+		// 幂等键检查
+		if params.ProductionBundle != nil && params.ProductionBundle.IdempotencyKey != nil {
+			idemKey := fmt.Sprintf("%s:%v", hookCall.Name, hookCall.Arguments)
+			rec, found, idemErr := params.ProductionBundle.IdempotencyKey.Check(ctx, idemKey)
+			if idemErr != nil {
+				slog.Warn("idempotency check failed, proceeding with execution", "error", idemErr)
+			} else if found && rec != nil {
+				cachedResult := &registry.ToolResult{
+					Content: fmt.Sprintf("%v", rec.Result),
+				}
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventToolCallResult,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Payload: cachedResult,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				if err := params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{
+					Role: string(message.RoleTool),
+					Content: cachedResult.Content,
+					ToolCallID: hookCall.ID,
+					ToolName: hookCall.Name,
+					Metadata: map[string]any{"is_error": false, "idempotency_cached": true},
+				}); err != nil {
+					emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record idempotency result: %w", err))
+				}
+				continue
+			}
+		}
+
+		// 通过所有预检查，加入待执行列表
+		passableCalls = append(passableCalls, registry.ToolCall{
+			ID: hookCall.ID,
+			Name: hookCall.Name,
+			Arguments: hookCall.Arguments,
+			SessionID: hookCall.SessionID,
+			TurnID: hookCall.TurnID,
+		})
+		passableHookCalls = append(passableHookCalls, hookCall)
+	}
+
+	// Phase 2: 并行执行
+	if len(passableCalls) == 0 {
+		return shouldTerminate, nil
+	}
+
+	execResults := params.ToolExecutor.ExecuteTools(ctx, passableCalls, params.ToolRegistry)
+
+	// Phase 3: 串行后处理
+	for i, execResult := range execResults {
+		hookCall := passableHookCalls[i]
+
+		// 构建工具结果
+		var toolResult *registry.ToolResult
+		if execResult.Error != nil {
+			toolResult = &registry.ToolResult{
+				Content: execResult.Error.Error(),
+				IsError: true,
+			}
+		} else if execResult.Result != nil {
+			toolResult = execResult.Result
+		} else {
+			toolResult = &registry.ToolResult{Content: ""}
+		}
+
+		// After 钩子
+		hookResult := &toolhook.ToolResult{
+			Content: toolResult.Content,
+			IsError: toolResult.IsError,
+			Details: toolResult.Details,
+			Metadata: make(map[string]any),
+		}
+		if params.HookPipeline != nil {
+			afterResult, err := params.HookPipeline.After(ctx, hookCall, hookResult)
+			if err != nil {
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventTurnEnd,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("hook after: %w", err))
+				return false, &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+			}
+			if afterResult.Terminate {
+				shouldTerminate = true
+			}
+			if afterResult.ModifiedResult != nil {
+				hookResult = afterResult.ModifiedResult
+			}
+		}
+
+		// 发射 EventToolCallResult
+		emitResult := &registry.ToolResult{
+			Content: hookResult.Content,
+			IsError: hookResult.IsError,
+			Details: hookResult.Details,
+		}
+		emitEvent(eventCh, event.AgentEvent{
+			Type: event.EventToolCallResult,
+			SubmissionID: params.SubmissionID,
+			TurnID: params.TurnID,
+			SessionID: params.SessionID,
+			Payload: emitResult,
+			Timestamp: time.Now().UnixMilli(),
+		})
+
+		// 记录工具结果到上下文
+		if err := params.ContextManager.RecordItem(ctx, ctxpkg.TurnItem{
+			Role: string(message.RoleTool),
+			Content: hookResult.Content,
+			ToolCallID: hookCall.ID,
+			ToolName: hookCall.Name,
+			Metadata: map[string]any{
+				"is_error": hookResult.IsError,
+			},
+		}); err != nil {
+			emitEvent(eventCh, event.AgentEvent{
+				Type: event.EventTurnEnd,
+				SubmissionID: params.SubmissionID,
+				TurnID: params.TurnID,
+				SessionID: params.SessionID,
+				Timestamp: time.Now().UnixMilli(),
+			})
+			emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record tool result: %w", err))
+			return false, &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+		}
+
+		// 自动压缩检查
+		if params.CompactThreshold > 0 {
+			usage := params.ContextManager.TokenUsage(ctx)
+			if usage > params.CompactThreshold {
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventCompactStart,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				_, compactErr := params.ContextManager.Compact(ctx, ctxpkg.CompactAuto)
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventCompactEnd,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				if compactErr != nil {
+					slog.Warn("auto-compact failed", "error", compactErr)
+				}
+			}
+		}
+
+		// 记录 Item 日志
+		if params.Logger != nil {
+			rec := log.NewItemRecord("tool_call", params.SessionID, params.TurnID)
+			rec.ToolName = hookCall.Name
+			rec.Input = hookCall.Arguments
+			rec.Output = hookResult.Content
+			if hookResult.IsError {
+				rec.Error = hookResult.Content
+			}
+			params.Logger.LogItem(ctx, rec)
+		}
+
+		// 循环检测
+		if params.ProductionBundle != nil && params.ProductionBundle.LoopDetector != nil {
+			_ = params.ProductionBundle.LoopDetector.Record(ctx, production.ToolCallRecord{ // 循环检测记录失败不影响工具执行
+				ToolName: hookCall.Name,
+				Arguments: hookCall.Arguments,
+				Timestamp: time.Now(),
+			})
+			if params.ProductionBundle.LoopDetector.IsLoop(ctx) {
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventToolLoopDetected,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Payload: hookCall.Name,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				g.forceTextReply(ctx, params, eventCh, hookCall.Name)
+				emitEvent(eventCh, event.AgentEvent{
+					Type: event.EventTurnEnd,
+					SubmissionID: params.SubmissionID,
+					TurnID: params.TurnID,
+					SessionID: params.SessionID,
+					Timestamp: time.Now().UnixMilli(),
+				})
+				return false, &TurnResult{Status: event.StatusCompleted, TurnCount: turnCount}
+			}
+		}
+
+		// 审计日志
+		if params.ProductionBundle != nil && params.ProductionBundle.AuditLogger != nil {
+			_ = params.ProductionBundle.AuditLogger.LogToolCall(ctx, production.AuditToolCallEvent{ // 审计日志记录失败不影响工具执行
+				Timestamp: time.Now(),
+				SessionID: params.SessionID,
+				ToolName: hookCall.Name,
+				Arguments: hookCall.Arguments,
+				Result: hookResult.Content,
+				Approved: true, // If we got here, the call was approved (not blocked)
+				DecisionBy: "auto",
+			})
+		}
+
+		// 幂等键记录
+		if params.ProductionBundle != nil && params.ProductionBundle.IdempotencyKey != nil {
+			idemKey := fmt.Sprintf("%s:%v", hookCall.Name, hookCall.Arguments)
+			_ = params.ProductionBundle.IdempotencyKey.Record(ctx, idemKey, hookResult.Content) // 幂等记录失败不影响工具执行
+		}
+	}
+
+	return shouldTerminate, nil
 }
 
 // ─── 包级辅助函数 ──────────────────────────────────────────────────
@@ -792,7 +1415,10 @@ func buildChatOptions(ctx context.Context, toolRegistry registry.ToolRegistry) *
 	return opts
 }
 
-// streamChatWithRetry 调用 StreamChat 并在遇到可重试的 HTTP 错误时进行指数退避重试。
+// streamChatWithRetry 调用 StreamChat 并在遇到可重试错误时进行指数退避重试。
+// 重试判断结合 provider.IsRetryableAssistantError（跨 provider 统一分类）
+// 和 rc.RetryOnHTTP（向后兼容的 HTTP 状态码白名单）。
+// 支持 Retry-After 响应头和抖动（jitter）。
 func streamChatWithRetry(ctx context.Context, p provider.ModelProvider, rc *RetryConfig, msgs []message.Message, chatOpts *provider.ChatOptions) (<-chan stream.StreamEvent, error) {
 	streamCh, err := p.StreamChat(ctx, msgs, chatOpts)
 	if err == nil {
@@ -804,8 +1430,8 @@ func streamChatWithRetry(ctx context.Context, p provider.ModelProvider, rc *Retr
 		return nil, err
 	}
 
-	// 检查是否为可重试的 HTTP 错误
-	if !isRetryableError(err, rc.RetryOnHTTP) {
+	// 检查是否为可重试错误：结合 provider 统一分类和 HTTPError 白名单
+	if !isRetryableWithProvider(err, rc.RetryOnHTTP) {
 		return nil, err
 	}
 
@@ -819,7 +1445,26 @@ func streamChatWithRetry(ctx context.Context, p provider.ModelProvider, rc *Retr
 	}
 
 	for retryCount := 0; retryCount < rc.MaxRetries; retryCount++ {
-		delay := time.Duration(math.Min(float64(baseDelay*time.Duration(1<<retryCount)), float64(maxDelay)))
+		// 指数退避 + 抖动
+		backoff := float64(baseDelay) * math.Pow(2, float64(retryCount))
+		if backoff > float64(maxDelay) {
+			backoff = float64(maxDelay)
+		}
+		// 添加抖动：取 backoff 的 50%-150%
+		jitter := rand.Float64() * backoff
+		backoff = backoff*0.5 + jitter
+		if backoff > float64(maxDelay) {
+			backoff = float64(maxDelay)
+		}
+		delay := time.Duration(backoff)
+
+		// 如果错误包含 RetryAfter，取较大值
+		if pe := provider.ClassifyError(err); pe != nil && pe.RetryAfter > 0 {
+			if pe.RetryAfter > delay {
+				delay = pe.RetryAfter
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -835,10 +1480,85 @@ func streamChatWithRetry(ctx context.Context, p provider.ModelProvider, rc *Retr
 		if err == nil {
 			return streamCh, nil
 		}
-		if !isRetryableError(err, rc.RetryOnHTTP) {
+		if !isRetryableWithProvider(err, rc.RetryOnHTTP) {
 			return nil, err
 		}
 	}
 
 	return nil, err
+}
+
+// isRetryableWithProvider 结合 provider 统一分类和 HTTPError 白名单判断错误是否可重试。
+// 优先使用 provider.IsRetryableAssistantError 进行跨 provider 统一分类，
+// 同时保留 RetryOnHTTP 白名单以向后兼容。
+func isRetryableWithProvider(err error, retryOnHTTP []int) bool {
+	// 1. 使用 provider 统一分类（覆盖 ProviderError、网络错误、消息正则匹配）
+	if provider.IsRetryableAssistantError(err) {
+		return true
+	}
+	// 2. 向后兼容：检查 RetryOnHTTP 白名单中的 HTTPError
+	if len(retryOnHTTP) > 0 {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) {
+			for _, code := range retryOnHTTP {
+				if httpErr.StatusCode == code {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// forceTextReply 在循环检测触发后，使用 ToolChoiceNone 再调用一次 LLM，
+// 生成文本摘要而非继续执行工具循环。
+//
+// 使用 context.WithoutCancel 派生不受父上下文取消影响的新上下文，
+// 确保 forceTextReply 能在父上下文被取消后仍完成 LLM 调用。
+func (g *DefaultLoopGenerator) forceTextReply(ctx context.Context, params *TurnParams, eventCh chan<- event.AgentEvent, loopToolName string) {
+	textCtx := context.WithoutCancel(ctx)
+
+	items, _ := params.ContextManager.GetMessages(textCtx, nil)
+	msgs := turnItemsToMessages(items)
+
+	msgs = append(msgs, message.Message{
+		Role: message.RoleUser,
+		Content: []message.Content{{
+			Type: message.ContentText,
+			Text: fmt.Sprintf("A tool loop was detected with tool %q. Please provide a text summary of what you were trying to do and why you couldn't complete it.", loopToolName),
+		}},
+	})
+
+	opts := &provider.ChatOptions{
+		ToolChoice: &provider.ToolChoiceConfig{Mode: provider.ToolChoiceNone},
+	}
+
+	streamCh, err := params.Provider.StreamChat(textCtx, msgs, opts)
+	if err != nil {
+		return
+	}
+
+	for evt := range streamCh {
+		if evt.Type == stream.StreamTextDelta {
+			emitEvent(eventCh, event.AgentEvent{
+				Type: event.EventTextDelta,
+				SubmissionID: params.SubmissionID,
+				TurnID: params.TurnID,
+				SessionID: params.SessionID,
+				Payload: evt.Content,
+				Timestamp: time.Now().UnixMilli(),
+			})
+			emitEvent(eventCh, event.AgentEvent{
+				Type: event.EventMessageUpdate,
+				SubmissionID: params.SubmissionID,
+				TurnID: params.TurnID,
+				SessionID: params.SessionID,
+				Payload: event.MessageUpdatePayload{
+					Type: event.MessageUpdateText,
+					Content: evt.Content,
+				},
+				Timestamp: time.Now().UnixMilli(),
+			})
+		}
+	}
 }

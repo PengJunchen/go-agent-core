@@ -78,6 +78,7 @@ func NewDefaultLoopAgent(cfg *LoopAgentConfig) (*DefaultLoopAgent, error) {
 		compactThreshold: cfg.CompactThreshold,
 		prepareNextTurn: cfg.PrepareNextTurn,
 		productionBundle: cfg.ProductionBundle,
+		toolExecutor: cfg.ToolExecutor,
 		generator: NewDefaultLoopGenerator(),
 		status: event.StatusIdle,
 	}
@@ -176,6 +177,12 @@ func (b *LoopAgentBuilder) WithPrepareNextTurn(fn PrepareNextTurnFunc) *LoopAgen
 // WithProduction 设置生产化组件包。传入 nil 表示不启用。
 func (b *LoopAgentBuilder) WithProduction(pb *production.ProductionBundle) *LoopAgentBuilder {
 	b.cfg.ProductionBundle = pb
+	return b
+}
+
+// WithToolExecutor 设置并行工具执行器。传入 nil 表示使用串行执行。
+func (b *LoopAgentBuilder) WithToolExecutor(exec *registry.ParallelToolExecutor) *LoopAgentBuilder {
+	b.cfg.ToolExecutor = exec
 	return b
 }
 

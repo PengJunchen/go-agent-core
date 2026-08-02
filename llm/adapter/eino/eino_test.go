@@ -72,6 +72,174 @@ func TestToEinoOptions_AllFields(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// toEinoOptions: ResponseFormat wiring (GAP-1)
+// ---------------------------------------------------------------------------
+
+func TestToEinoOptions_ResponseFormat_JSONSchema(t *testing.T) {
+	opts := &provider.ChatOptions{
+		ResponseFormat: &provider.ResponseFormat{
+			Type: provider.ConstrainedJSONSchema,
+			JSONSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"name": map[string]any{"type": "string"}},
+				"title": "MySchema",
+			},
+		},
+	}
+	result := toEinoOptions(opts)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 option, got %d", len(result))
+	}
+}
+
+func TestToEinoOptions_ResponseFormat_GrammarNotWired(t *testing.T) {
+	// grammar 模式暂不支持 OpenAI，不应产生选项
+	opts := &provider.ChatOptions{
+		ResponseFormat: &provider.ResponseFormat{
+			Type: provider.ConstrainedGrammar,
+		},
+	}
+	result := toEinoOptions(opts)
+	if len(result) != 0 {
+		t.Fatalf("expected 0 options for grammar mode, got %d", len(result))
+	}
+}
+
+func TestToEinoOptions_ResponseFormat_Nil(t *testing.T) {
+	opts := &provider.ChatOptions{}
+	result := toEinoOptions(opts)
+	if len(result) != 0 {
+		t.Fatalf("expected 0 options for nil ResponseFormat, got %d", len(result))
+	}
+}
+
+func TestToResponseFormatOption_JSONSchema(t *testing.T) {
+	rf := &provider.ResponseFormat{
+		Type: provider.ConstrainedJSONSchema,
+		JSONSchema: map[string]any{
+			"type": "object",
+			"title": "UserInfo",
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string"},
+			},
+		},
+	}
+	// 验证不 panic 且产出可用的 model.Option
+	opt := toResponseFormatOption(rf)
+	// 通过 GetCommonOptions 验证这不是一个 common option（不应修改任何公共字段）
+	common := model.GetCommonOptions(nil, opt)
+	if common.Temperature != nil || common.MaxTokens != nil || common.Tools != nil {
+		t.Error("ResponseFormat option should not set common fields")
+	}
+}
+
+func TestToResponseFormatOption_NoSchema(t *testing.T) {
+	rf := &provider.ResponseFormat{
+		Type: provider.ConstrainedJSONSchema,
+	}
+	opt := toResponseFormatOption(rf)
+	common := model.GetCommonOptions(nil, opt)
+	if common.Temperature != nil {
+		t.Error("ResponseFormat option should not set common fields")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// toEinoOptions: ThinkingMode wiring (GAP-2)
+// ---------------------------------------------------------------------------
+
+func TestToEinoOptions_ThinkingMode_Enabled(t *testing.T) {
+	opts := &provider.ChatOptions{
+		ThinkingMode: &provider.ThinkingConfig{
+			Enabled: true,
+			Budget: 8192,
+		},
+	}
+	result := toEinoOptions(opts)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 option, got %d", len(result))
+	}
+}
+
+func TestToEinoOptions_ThinkingMode_Disabled(t *testing.T) {
+	opts := &provider.ChatOptions{
+		ThinkingMode: &provider.ThinkingConfig{
+			Enabled: false,
+			Budget: 8192,
+		},
+	}
+	result := toEinoOptions(opts)
+	if len(result) != 0 {
+		t.Fatalf("expected 0 options for disabled ThinkingMode, got %d", len(result))
+	}
+}
+
+func TestToEinoOptions_ThinkingMode_Nil(t *testing.T) {
+	opts := &provider.ChatOptions{}
+	result := toEinoOptions(opts)
+	if len(result) != 0 {
+		t.Fatalf("expected 0 options for nil ThinkingMode, got %d", len(result))
+	}
+}
+
+func TestToThinkingModeOption_BudgetMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		budget int
+	}{
+		{"low budget maps to low effort", 2048},
+		{"medium budget maps to medium effort", 8192},
+		{"high budget maps to high effort", 32768},
+		{"zero budget maps to high effort", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &provider.ThinkingConfig{
+				Enabled: true,
+				Budget: c.budget,
+			}
+			opt := toThinkingModeOption(tc)
+			// 通过 GetCommonOptions 验证这不是一个 common option
+			common := model.GetCommonOptions(nil, opt)
+			if common.Temperature != nil || common.MaxTokens != nil {
+				t.Error("ThinkingMode option should not set common fields")
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// toEinoOptions: combined ResponseFormat + ThinkingMode with existing fields
+// ---------------------------------------------------------------------------
+
+func TestToEinoOptions_AllFieldsWithResponseFormatAndThinking(t *testing.T) {
+	temp := 0.7
+	maxTokens := 2048
+	opts := &provider.ChatOptions{
+		Temperature: &temp,
+		MaxTokens: &maxTokens,
+		StopSequences: []string{"END"},
+		Tools: []provider.ToolSpec{
+			{Name: "get_weather", Description: "Get weather"},
+		},
+		ToolChoice: &provider.ToolChoiceConfig{Mode: provider.ToolChoiceAuto},
+		ResponseFormat: &provider.ResponseFormat{
+			Type: provider.ConstrainedJSONSchema,
+			JSONSchema: map[string]any{"type": "object"},
+		},
+		ThinkingMode: &provider.ThinkingConfig{
+			Enabled: true,
+			Budget: 8192,
+		},
+	}
+	result := toEinoOptions(opts)
+	// Temperature + MaxTokens + Stop + Tools + ToolChoice + ResponseFormat + ThinkingMode = 7
+	if len(result) != 7 {
+		t.Fatalf("expected 7 options, got %d", len(result))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // toEinoToolChoice
 // ---------------------------------------------------------------------------
 

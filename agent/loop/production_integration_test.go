@@ -82,15 +82,20 @@ func TestProductionBundle_LoopDetectorIntegration(t *testing.T) {
 
 	pb := production.NewProductionBundle(production.WithLoopDetector(ld))
 
-	// 构造 4 轮响应：每轮都调用相同的 repeat_tool（阈值=3，第3次应触发检测）
+	// 构造 4 轮工具调用响应 + 1 轮文本响应（用于 forceTextReply）
+	// 阈值=3，第3次应触发检测，随后 forceTextReply 使用第5个响应生成文本
 	toolArgs := map[string]any{"action": "repeat"}
 	responses := make([][]stream.StreamEvent, 5)
-	for i := range responses {
+	for i := 0; i < 4; i++ {
 		responses[i] = sameToolCallResponse(
 			fmt.Sprintf("tc-%d", i),
 			"repeat_tool",
 			toolArgs,
 		)
+	}
+	responses[4] = []stream.StreamEvent{
+		{Type: stream.StreamTextDelta, Content: "I was trying to repeat the action but got stuck in a loop."},
+		{Type: stream.StreamDone},
 	}
 
 	agent := setupAgentWithProduction(responses, 10, pb)
@@ -120,9 +125,9 @@ func TestProductionBundle_LoopDetectorIntegration(t *testing.T) {
 		t.Errorf("missing EventToolLoopDetected, got %v", eventTypes(events))
 	}
 
-	// 验证 Agent 进入 StatusError
-	if agent.Status() != event.StatusError {
-		t.Errorf("status = %v, want %v", agent.Status(), event.StatusError)
+	// 验证 Agent 进入 StatusCompleted（forceTextReply 生成文本后正常完成）
+	if agent.Status() != event.StatusCompleted {
+		t.Errorf("status = %v, want %v", agent.Status(), event.StatusCompleted)
 	}
 
 	// 验证 EventCompleted 仍然被发送（P0 Fix 1）
