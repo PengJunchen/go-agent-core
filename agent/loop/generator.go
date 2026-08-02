@@ -256,14 +256,14 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 			}
 		}
 
-		// 记录 LLM 调用日志（调用前）
+		// 记录 LLM 调用日志（调用前，含完整消息用于排查 API 错误）
 		if params.Logger != nil {
 			llmRec := log.NewItemRecord("llm_call", params.SessionID, params.TurnID)
 			if mi := activeProvider.ModelInfo(); mi != nil {
 				llmRec.Provider = mi.Provider
 				llmRec.Model = mi.ModelName
 			}
-			llmRec.Input = params.Prompt
+			llmRec.Input = serializeMessages(msgs)
 			params.Logger.LogItem(ctx, llmRec)
 		}
 
@@ -303,8 +303,8 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 					Timestamp: time.Now().UnixMilli(),
 				})
 				emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("stream chat: %w", chatErr))
-			g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, chatErr)
-			return &TurnResult{Status: event.StatusError, Error: chatErr, TurnCount: turnCount}
+				g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, chatErr)
+				return &TurnResult{Status: event.StatusError, Error: chatErr, TurnCount: turnCount}
 			}
 		}
 
@@ -415,6 +415,12 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				streamDone = true
 
 			case stream.StreamError:
+				// 记录 LLM 流错误到 runs 轨（含错误详情用于排查）
+				if params.Logger != nil {
+					errRec := log.NewItemRecord("llm_call", params.SessionID, params.TurnID)
+					errRec.Error = streamEvt.Error.Error()
+					params.Logger.LogItem(ctx, errRec)
+				}
 				emitEvent(eventCh, event.AgentEvent{
 					Type: event.EventTurnEnd,
 					SubmissionID: params.SubmissionID,
@@ -531,8 +537,8 @@ func (g *DefaultLoopGenerator) RunTurn(ctx context.Context, params *TurnParams, 
 				Timestamp: time.Now().UnixMilli(),
 			})
 			emitError(eventCh, params.SubmissionID, params.TurnID, params.SessionID, fmt.Errorf("record assistant message: %w", err))
-		g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, err)
-		return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
+			g.synthesizeFailureMessage(ctx, params, eventCh, turnCount, err)
+			return &TurnResult{Status: event.StatusError, Error: err, TurnCount: turnCount}
 		}
 
 		// 没有工具调用 → 退出循环
@@ -1561,4 +1567,39 @@ func (g *DefaultLoopGenerator) forceTextReply(ctx context.Context, params *TurnP
 			})
 		}
 	}
+}
+
+// serializeMessages 将消息列表序列化为可日志化的结构（含 tool call arguments）。
+// 用于 LLM 调用日志的 Input 字段，确保从日志即可排查 API 参数错误。
+func serializeMessages(msgs []message.Message) any {
+	type toolCallLog struct {
+		ID string `json:"id"`
+		Name string `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	type messageLog struct {
+		Role string `json:"role"`
+		Content string `json:"content,omitempty"`
+		ToolCalls []toolCallLog `json:"tool_calls,omitempty"`
+		ToolCallID string `json:"tool_call_id,omitempty"`
+	}
+
+	out := make([]messageLog, 0, len(msgs))
+	for _, m := range msgs {
+		ml := messageLog{Role: string(m.Role), ToolCallID: m.ToolCallID}
+		for _, c := range m.Content {
+			if c.Type == message.ContentText && c.Text != "" {
+				ml.Content += c.Text
+			}
+		}
+		for _, tc := range m.ToolCalls {
+			ml.ToolCalls = append(ml.ToolCalls, toolCallLog{
+				ID: tc.ID,
+				Name: tc.Name,
+				Arguments: tc.Arguments,
+			})
+		}
+		out = append(out, ml)
+	}
+	return out
 }

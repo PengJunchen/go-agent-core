@@ -946,3 +946,46 @@ func TestRoundTrip_SystemMessage(t *testing.T) {
 		t.Errorf("Role mismatch: %v vs %v", back.Role, message.RoleSystem)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 空 Arguments 测试：确保 tool call arguments 为空时发送 "{}" 而非 ""
+// ---------------------------------------------------------------------------
+
+func TestToEinoToolCalls_EmptyArguments(t *testing.T) {
+	msg := message.Message{
+		Role: message.RoleAssistant,
+		ToolCalls: []message.ToolCall{
+			{ID: "tc1", Name: "list_files", Arguments: nil},
+			{ID: "tc2", Name: "get_status", Arguments: map[string]any{}},
+			{ID: "tc3", Name: "read_file", Arguments: map[string]any{"path": "/tmp"}},
+		},
+	}
+	einoMsg := ToEinoMessage(msg)
+	if len(einoMsg.ToolCalls) != 3 {
+		t.Fatalf("expected 3 tool calls, got %d", len(einoMsg.ToolCalls))
+	}
+	// nil Arguments → arguments 必须是 "{}"，而非空串
+	if einoMsg.ToolCalls[0].Function.Arguments != "{}" {
+		t.Errorf("nil Arguments: got %q, want {}", einoMsg.ToolCalls[0].Function.Arguments)
+	}
+	// 空 map Arguments → arguments 必须是 "{}"
+	if einoMsg.ToolCalls[1].Function.Arguments != "{}" {
+		t.Errorf("empty Arguments: got %q, want {}", einoMsg.ToolCalls[1].Function.Arguments)
+	}
+	// 非空 Arguments → 正常 JSON
+	if einoMsg.ToolCalls[2].Function.Arguments != `{"path":"/tmp"}` {
+		t.Errorf("non-empty Arguments: got %q, want {\"path\":\"/tmp\"}", einoMsg.ToolCalls[2].Function.Arguments)
+	}
+}
+
+func TestMarshalJSONArgs_Empty(t *testing.T) {
+	if got := marshalJSONArgs(nil); got != "{}" {
+		t.Errorf("marshalJSONArgs(nil) = %q, want {}", got)
+	}
+	if got := marshalJSONArgs(map[string]any{}); got != "{}" {
+		t.Errorf("marshalJSONArgs(empty) = %q, want {}", got)
+	}
+	if got := marshalJSONArgs(map[string]any{"key": "val"}); got != `{"key":"val"}` {
+		t.Errorf("marshalJSONArgs(non-empty) = %q, want {\"key\":\"val\"}", got)
+	}
+}

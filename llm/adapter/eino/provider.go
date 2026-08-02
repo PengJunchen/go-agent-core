@@ -58,16 +58,30 @@ func (p *EinoProvider) StreamChat(ctx context.Context, msgs []message.Message, o
 }
 
 // pumpStream 从 schema.StreamReader[*schema.Message] 持续拉取消息并产出 StreamEvent。
+//
+// 流式模式下，OpenAI 等协议的 tool call arguments 是增量的（每次 chunk 只包含
+// 部分 arguments）。如果直接对每个 chunk 发射 StreamToolCallStart，会导致：
+// - 不完整的 arguments 被解析为空 map
+// - 同一个 tool call 被多次发射
+// - 重建消息时 arguments 格式错误（如 {"raw":"..."}）
+//
+// 因此 pumpStream 对 tool call 做累积合并：只在流结束时（StreamDone）
+// 发射完整的 StreamToolCallStart 事件。文本和思维增量则实时发射。
 func pumpStream(reader *schema.StreamReader[*schema.Message]) <-chan stream.StreamEvent {
 	eventCh := make(chan stream.StreamEvent, 64)
 	go func() {
 		defer close(eventCh)
 		defer reader.Close()
 
+		// 累积 tool calls（按 ID 合并增量 arguments）
+		var pendingToolCalls []schema.ToolCall
+
 		for {
 			chunk, err := reader.Recv()
 			if err != nil {
 				if err == io.EOF {
+					// 流结束：发射累积的 tool call 事件
+					emitPendingToolCalls(eventCh, pendingToolCalls)
 					eventCh <- stream.StreamEvent{Type: stream.StreamDone}
 					return
 				}
@@ -78,10 +92,111 @@ func pumpStream(reader *schema.StreamReader[*schema.Message]) <-chan stream.Stre
 				continue
 			}
 
-			emitEvents(eventCh, chunk)
+			// 处理文本和思维增量（实时发射）
+			emitTextAndThinking(eventCh, chunk)
+
+			// 累积 tool calls（不发射，等流结束）
+			if len(chunk.ToolCalls) > 0 {
+				pendingToolCalls = mergeToolCalls(pendingToolCalls, chunk.ToolCalls)
+			}
 		}
 	}()
 	return eventCh
+}
+
+// emitPendingToolCalls 在流结束时发射完整的 tool call 事件。
+func emitPendingToolCalls(ch chan<- stream.StreamEvent, toolCalls []schema.ToolCall) {
+	for _, tc := range toolCalls {
+		args := make(map[string]any)
+		if tc.Function.Arguments != "" {
+			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args) // tool call args 容错解析
+		}
+		ch <- stream.StreamEvent{
+			Type: stream.StreamToolCallStart,
+			ToolCall: &stream.ToolCall{
+				ID: tc.ID,
+				Name: tc.Function.Name,
+				Arguments: args,
+			},
+		}
+	}
+}
+
+// mergeToolCalls 合并增量 tool calls（按 ID 累积 arguments）。
+//
+// OpenAI 流式协议中，tool call 的 arguments 是分段传输的：
+//
+//	chunk 1: ToolCalls[0] = {ID:"call_1", Function:{Name:"read_file", Arguments:"{\"pa"}}
+//	chunk 2: ToolCalls[0] = {ID:"call_1", Function:{Name:"", Arguments:"th\":"}}
+//	chunk 3: ToolCalls[0] = {ID:"call_1", Function:{Name:"", Arguments:"\"/tmp\"}"}}
+//
+// 合并策略：按 ID 匹配，Arguments 字符串追加，Name 取首次非空值。
+func mergeToolCalls(existing []schema.ToolCall, incoming []schema.ToolCall) []schema.ToolCall {
+	for _, inc := range incoming {
+		if inc.ID == "" {
+			continue
+		}
+		found := false
+		for i := range existing {
+			if existing[i].ID == inc.ID {
+				// 合并：追加 arguments
+				existing[i].Function.Arguments += inc.Function.Arguments
+				// Name：取首次非空值
+				if existing[i].Function.Name == "" && inc.Function.Name != "" {
+					existing[i].Function.Name = inc.Function.Name
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			existing = append(existing, inc)
+		}
+	}
+	return existing
+}
+
+// emitTextAndThinking 仅发射文本和思维增量（不发射 tool call）。
+func emitTextAndThinking(ch chan<- stream.StreamEvent, msg *schema.Message) {
+	if msg == nil {
+		return
+	}
+
+	// 1. 文本增量
+	if msg.Content != "" {
+		ch <- stream.StreamEvent{
+			Type: stream.StreamTextDelta,
+			Content: msg.Content,
+		}
+	}
+
+	// 2. 思维增量
+	if msg.ReasoningContent != "" {
+		ch <- stream.StreamEvent{
+			Type: stream.StreamThinkingDelta,
+			Thinking: msg.ReasoningContent,
+		}
+	}
+
+	// 3. 多内容输出块
+	for _, part := range msg.AssistantGenMultiContent {
+		switch part.Type {
+		case schema.ChatMessagePartTypeText:
+			if part.Text != "" {
+				ch <- stream.StreamEvent{
+					Type: stream.StreamTextDelta,
+					Content: part.Text,
+				}
+			}
+		case schema.ChatMessagePartTypeReasoning:
+			if part.Reasoning != nil && part.Reasoning.Text != "" {
+				ch <- stream.StreamEvent{
+					Type: stream.StreamThinkingDelta,
+					Thinking: part.Reasoning.Text,
+				}
+			}
+		}
+	}
 }
 
 // Generate 同步生成，将 []message.Message 转为 Eino 消息后调用 Generate。
@@ -308,9 +423,6 @@ func emitEvents(ch chan<- stream.StreamEvent, msg *schema.Message) {
 		if tc.Function.Arguments != "" {
 			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args) // tool call args 容错解析
 		}
-		if len(args) == 0 && tc.Function.Arguments != "" {
-			args["raw"] = tc.Function.Arguments
-		}
 		ch <- stream.StreamEvent{
 			Type: stream.StreamToolCallStart,
 			ToolCall: &stream.ToolCall{
@@ -487,16 +599,23 @@ func fromAgenticMessage(m *schema.AgenticMessage) *message.Message {
 }
 
 // pumpAgenticStream 从 *schema.StreamReader[*schema.AgenticMessage] 持续拉取消息并产出 StreamEvent。
+//
+// 与 pumpStream 类似，对 tool call 做累积合并，避免增量 arguments 导致格式错误。
 func pumpAgenticStream(reader *schema.StreamReader[*schema.AgenticMessage]) <-chan stream.StreamEvent {
 	eventCh := make(chan stream.StreamEvent, 64)
 	go func() {
 		defer close(eventCh)
 		defer reader.Close()
 
+		// 累积 tool calls（按 CallID 合并增量 arguments）
+		var pendingToolCalls []agenticToolCallAccum
+
 		for {
 			chunk, err := reader.Recv()
 			if err != nil {
 				if err == io.EOF {
+					// 流结束：发射累积的 tool call 事件
+					emitPendingAgenticToolCalls(eventCh, pendingToolCalls)
 					eventCh <- stream.StreamEvent{Type: stream.StreamDone}
 					return
 				}
@@ -507,10 +626,92 @@ func pumpAgenticStream(reader *schema.StreamReader[*schema.AgenticMessage]) <-ch
 				continue
 			}
 
-			emitAgenticEvents(eventCh, chunk)
+			// 处理文本和思维增量（实时发射）
+			emitAgenticTextAndThinking(eventCh, chunk)
+
+			// 累积 tool calls
+			for _, block := range chunk.ContentBlocks {
+				if block != nil && block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
+					pendingToolCalls = mergeAgenticToolCall(pendingToolCalls, block.FunctionToolCall)
+				}
+			}
 		}
 	}()
 	return eventCh
+}
+
+// agenticToolCallAccum 累积 Agentic 模式的 tool call。
+type agenticToolCallAccum struct {
+	CallID string
+	Name string
+	Arguments string // 累积的原始 JSON 字符串
+}
+
+// mergeAgenticToolCall 合并增量 agentic tool call。
+func mergeAgenticToolCall(existing []agenticToolCallAccum, fc *schema.FunctionToolCall) []agenticToolCallAccum {
+	if fc == nil || fc.CallID == "" {
+		return existing
+	}
+	for i := range existing {
+		if existing[i].CallID == fc.CallID {
+			existing[i].Arguments += fc.Arguments
+			if existing[i].Name == "" && fc.Name != "" {
+				existing[i].Name = fc.Name
+			}
+			return existing
+		}
+	}
+	return append(existing, agenticToolCallAccum{
+		CallID: fc.CallID,
+		Name: fc.Name,
+		Arguments: fc.Arguments,
+	})
+}
+
+// emitPendingAgenticToolCalls 在流结束时发射完整的 agentic tool call 事件。
+func emitPendingAgenticToolCalls(ch chan<- stream.StreamEvent, toolCalls []agenticToolCallAccum) {
+	for _, tc := range toolCalls {
+		args := make(map[string]any)
+		if tc.Arguments != "" {
+			_ = json.Unmarshal([]byte(tc.Arguments), &args) // tool call args 容错解析
+		}
+		ch <- stream.StreamEvent{
+			Type: stream.StreamToolCallStart,
+			ToolCall: &stream.ToolCall{
+				ID: tc.CallID,
+				Name: tc.Name,
+				Arguments: args,
+			},
+		}
+	}
+}
+
+// emitAgenticTextAndThinking 仅发射 Agentic 消息的文本和思维增量。
+func emitAgenticTextAndThinking(ch chan<- stream.StreamEvent, msg *schema.AgenticMessage) {
+	if msg == nil {
+		return
+	}
+	for _, block := range msg.ContentBlocks {
+		if block == nil {
+			continue
+		}
+		switch block.Type {
+		case schema.ContentBlockTypeAssistantGenText:
+			if block.AssistantGenText != nil && block.AssistantGenText.Text != "" {
+				ch <- stream.StreamEvent{
+					Type: stream.StreamTextDelta,
+					Content: block.AssistantGenText.Text,
+				}
+			}
+		case schema.ContentBlockTypeReasoning:
+			if block.Reasoning != nil && block.Reasoning.Text != "" {
+				ch <- stream.StreamEvent{
+					Type: stream.StreamThinkingDelta,
+					Thinking: block.Reasoning.Text,
+				}
+			}
+		}
+	}
 }
 
 // emitAgenticEvents 将单个 AgenticMessage 块转换为零到多个 StreamEvent。
@@ -586,7 +787,7 @@ func fromAgenticRole(r schema.AgenticRoleType) message.Role {
 
 func marshalJSONArgs(v map[string]any) string {
 	if len(v) == 0 {
-		return ""
+		return "{}" // Anthropic/OpenAI 要求 arguments 必须是合法 JSON object
 	}
 	b, _ := json.Marshal(v)
 	return string(b)

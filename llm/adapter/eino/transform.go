@@ -106,10 +106,12 @@ func toEinoImageInput(img *message.Image) schema.MessageInputPart {
 func toEinoToolCalls(tcs []message.ToolCall) []schema.ToolCall {
 	out := make([]schema.ToolCall, 0, len(tcs))
 	for _, tc := range tcs {
-		args := ""
+		var args string
 		if len(tc.Arguments) > 0 {
 			b, _ := json.Marshal(tc.Arguments)
 			args = string(b)
+		} else {
+			args = "{}" // OpenAI 要求 arguments 必须是合法 JSON object
 		}
 		out = append(out, schema.ToolCall{
 			ID: tc.ID,
