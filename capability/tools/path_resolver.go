@@ -100,6 +100,8 @@ func (r *PathResolver) checkSandbox(resolved string) error {
 
 // resolveNFCNFD handles the macOS HFS+ normalization mismatch.
 // If the NFC path doesn't exist, it tries the NFD form and vice versa.
+// As a last resort, it scans the parent directory for a matching entry
+// by comparing NFC-normalized basenames.
 func (r *PathResolver) resolveNFCNFD(path string) string {
 	nfcPath := norm.NFC.String(path)
 	nfdPath := norm.NFD.String(path)
@@ -117,6 +119,20 @@ func (r *PathResolver) resolveNFCNFD(path string) string {
 	_, nfdErr := os.Stat(nfdPath)
 	if nfdErr == nil {
 		return nfdPath
+	}
+
+	// Fallback: scan parent directory for a file whose NFC-normalized
+	// basename matches the expected NFC basename.
+	nfcBase := norm.NFC.String(filepath.Base(nfcPath))
+	parent := filepath.Dir(nfcPath)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return nfcPath
+	}
+	for _, entry := range entries {
+		if norm.NFC.String(entry.Name()) == nfcBase {
+			return filepath.Join(parent, entry.Name())
+		}
 	}
 
 	// Neither exists; return the NFC form (canonical) for consistency.
