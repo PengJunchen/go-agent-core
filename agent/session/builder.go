@@ -3,8 +3,8 @@ package session
 import (
 	"errors"
 
-	"github.com/pengjunchen/go-agent-core/agent/middleware"
 	"github.com/pengjunchen/go-agent-core/agent/loop"
+	"github.com/pengjunchen/go-agent-core/agent/middleware"
 	"github.com/pengjunchen/go-agent-core/capability/mcp"
 	"github.com/pengjunchen/go-agent-core/capability/registry"
 	"github.com/pengjunchen/go-agent-core/capability/toolhook"
@@ -122,7 +122,7 @@ func (b *DefaultSessionBuilder) WithSettings(settings config.Settings) *DefaultS
 // auto-assembled via config.LoadAndAssemble. The caller still needs to set
 // ContextManager if not already provided.
 // If settings only has MaxTurns/CompactThreshold, this works as before (backward compatible).
-func NewBuilderFromSettings(settings config.Settings) *DefaultSessionBuilder {
+func NewBuilderFromSettings(settings config.Settings, projectDir string) *DefaultSessionBuilder {
 	b := NewBuilder()
 	if settings.MaxTurns > 0 {
 		b.maxTurns = settings.MaxTurns
@@ -132,7 +132,7 @@ func NewBuilderFromSettings(settings config.Settings) *DefaultSessionBuilder {
 	}
 
 	// Config-driven auto-assembly: load Provider, MCP servers, and tool subset.
-	ac, err := config.LoadAndAssemble(settings)
+	ac, err := config.LoadAndAssemble(settings, projectDir)
 	if err != nil {
 		b.err = err
 		return b

@@ -28,7 +28,83 @@ func mergeSettings(dst, src Settings) Settings {
 		}
 		dst.Extra = deepMergeMaps(dst.Extra, src.Extra)
 	}
+	// 嵌套字段合并
+	if src.ModelCfg != nil {
+		if dst.ModelCfg == nil {
+			dst.ModelCfg = &ModelConfig{}
+		}
+		dst.ModelCfg = mergeModelConfig(dst.ModelCfg, src.ModelCfg)
+	}
+	if src.SkillsCfg != nil {
+		if dst.SkillsCfg == nil {
+			dst.SkillsCfg = &SkillsConfig{}
+		}
+		dst.SkillsCfg = mergeSkillsConfig(dst.SkillsCfg, src.SkillsCfg)
+	}
+	if src.MCPCfg != nil {
+		if dst.MCPCfg == nil {
+			dst.MCPCfg = &MCPConfig{}
+		}
+		dst.MCPCfg = mergeMCPConfig(dst.MCPCfg, src.MCPCfg)
+	}
 	return dst
+}
+
+// mergeModelConfig 合并 ModelConfig（src 非零值覆盖 dst）。
+func mergeModelConfig(dst, src *ModelConfig) *ModelConfig {
+	result := *dst
+	if src.Provider != "" {
+		result.Provider = src.Provider
+	}
+	if src.Name != "" {
+		result.Name = src.Name
+	}
+	if src.BaseURL != "" {
+		result.BaseURL = src.BaseURL
+	}
+	if src.APIKey != "" {
+		result.APIKey = src.APIKey
+	}
+	if src.APIKeyEnv != "" {
+		result.APIKeyEnv = src.APIKeyEnv
+	}
+	if src.Timeout != nil {
+		result.Timeout = src.Timeout
+	}
+	if src.Temperature != nil {
+		result.Temperature = src.Temperature
+	}
+	if src.MaxTokens != nil {
+		result.MaxTokens = src.MaxTokens
+	}
+	return &result
+}
+
+// mergeSkillsConfig 合并 SkillsConfig（src 非零值覆盖 dst）。
+func mergeSkillsConfig(dst, src *SkillsConfig) *SkillsConfig {
+	result := *dst
+	if len(src.Dirs) > 0 {
+		result.Dirs = src.Dirs
+	}
+	if src.AutoDiscover != nil {
+		result.AutoDiscover = src.AutoDiscover
+	}
+	if src.Enabled != nil {
+		result.Enabled = src.Enabled
+	}
+	if len(src.Disabled) > 0 {
+		result.Disabled = src.Disabled
+	}
+	return &result
+}
+
+// mergeMCPConfig 合并 MCPConfig（src 非零值覆盖 dst）。
+func mergeMCPConfig(dst, src *MCPConfig) *MCPConfig {
+	result := *dst
+	if src.ConfigPath != "" {
+		result.ConfigPath = src.ConfigPath
+	}
+	return &result
 }
 
 // deepMergeMaps 递归合并 src 到 dst。

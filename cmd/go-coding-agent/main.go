@@ -45,8 +45,8 @@ func main() {
 		logDir string
 	)
 
-	flag.StringVar(&providerName, "provider", "", "Provider name (e.g., openai, gemini)")
-	flag.StringVar(&modelName, "model", "", "Model name to use (e.g., gpt-4o, claude-sonnet-4-20250514)")
+	flag.StringVar(&providerName, "provider", "", "Provider name (e.g., openai, deepseek, gemini)")
+	flag.StringVar(&modelName, "model", "", "Model name to use (e.g., deepseek-chat, gpt-4o)")
 	flag.BoolVar(&printMode, "print", false, "Single-turn mode: print response and exit")
 	flag.StringVar(&workspace, "workspace", "", "Project root directory (defaults to cwd)")
 	flag.StringVar(&resumeSessionID, "resume", "", "Resume a previous session by its ID (loads history from log directory)")
@@ -63,19 +63,35 @@ func main() {
 		}
 	}
 
-	// Determine provider and model.
+	// Load settings from .go-agent/settings.json ().
+	settingsMgr := config.NewSettingsManager()
+	_ = settingsMgr.LoadGlobal()
+	_ = settingsMgr.LoadProject(workspace)
+	settings := settingsMgr.Get()
+
+	// CLI / env overrides for provider and model.
 	if providerName == "" {
 		providerName = os.Getenv("GO_AGENT_PROVIDER")
-	}
-	if providerName == "" {
-		providerName = config.DefaultProvider // default from config package
 	}
 	if modelName == "" {
 		modelName = os.Getenv("GO_AGENT_MODEL")
 	}
-	if modelName == "" {
-		modelName = config.DefaultModel // default from config package
+	// CLI flags override settings
+	if providerName != "" || modelName != "" {
+		cliSettings := config.Settings{}
+		if providerName != "" {
+			cliSettings.Provider = providerName
+		}
+		if modelName != "" {
+			cliSettings.Model = modelName
+		}
+		settingsMgr.Set(cliSettings)
+		settings = settingsMgr.Get()
 	}
+
+	// Use effective values from settings (nested config takes priority).
+	effectiveProvider := settings.GetEffectiveProvider()
+	effectiveModel := settings.GetEffectiveModel()
 
 	// Get the query from remaining args or stdin.
 	query := strings.Join(flag.Args(), " ")
@@ -91,8 +107,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Build the Session.
-	sess, err := buildSession(ctx, workspace, providerName, modelName)
+	// Build the Session using settings-driven assembly.
+	sess, err := buildSessionFromSettings(ctx, workspace, settings, effectiveProvider, effectiveModel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed to build session:", err)
 		os.Exit(1)
@@ -139,12 +155,22 @@ func main() {
 	os.Exit(runInteractiveMode(ctx, sess, sessionID))
 }
 
-// buildSession creates a Session with all built-in tools and defaults.
-func buildSession(ctx context.Context, workspace, providerName, modelName string) (*agentsess.Session, error) {
-	// Create the ModelProvider via the registry.
-	p, err := createProvider(providerName, modelName)
+// buildSessionFromSettings creates a Session using settings-driven assembly.
+// Falls back to manual assembly if settings-based assembly fails.
+func buildSessionFromSettings(ctx context.Context, workspace string, settings config.Settings, providerName, modelName string) (*agentsess.Session, error) {
+	// Try settings-driven assembly first.
+	ac, err := config.LoadAndAssemble(settings, workspace)
 	if err != nil {
-		return nil, fmt.Errorf("create provider: %w", err)
+		return nil, fmt.Errorf("settings assembly: %w", err)
+	}
+
+	// If LoadAndAssemble didn't create a provider, create one manually.
+	p := ac.Provider
+	if p == nil {
+		p, err = createProvider(providerName, modelName)
+		if err != nil {
+			return nil, fmt.Errorf("create provider: %w", err)
+		}
 	}
 
 	// Create and populate the tool registry.

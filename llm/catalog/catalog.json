@@ -82,6 +82,40 @@
  "tool_use": true,
  "json_mode": true
  }
+ },
+ {
+ "provider": "deepseek",
+ "model_name": "deepseek-chat",
+ "context_window": 64000,
+ "max_output_tokens": 8192,
+ "cost_input_per_million": 0.27,
+ "cost_output_per_million": 1.10,
+ "cache_read_per_million": 0.07,
+ "cache_write_per_million": 0.27,
+ "supports_streaming": true,
+ "supports_vision": false,
+ "supports_thinking": false,
+ "compat": {
+ "tool_use": true,
+ "json_mode": true
+ }
+ },
+ {
+ "provider": "deepseek",
+ "model_name": "deepseek-reasoner",
+ "context_window": 64000,
+ "max_output_tokens": 8192,
+ "cost_input_per_million": 0.55,
+ "cost_output_per_million": 2.19,
+ "cache_read_per_million": 0.14,
+ "cache_write_per_million": 0.55,
+ "supports_streaming": true,
+ "supports_vision": false,
+ "supports_thinking": true,
+ "compat": {
+ "tool_use": true,
+ "json_mode": true
+ }
  }
  ]
 }

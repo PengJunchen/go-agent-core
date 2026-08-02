@@ -584,7 +584,7 @@ func TestSession_BuilderFromSettings(t *testing.T) {
 		CompactThreshold: 5000,
 	}
 
-	b := NewBuilderFromSettings(settings)
+	b := NewBuilderFromSettings(settings, "")
 
 	if b.maxTurns != 42 {
 		t.Errorf("maxTurns = %d, want 42", b.maxTurns)

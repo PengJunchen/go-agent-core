@@ -18,7 +18,14 @@ import (
 )
 
 // Settings 保存所有 Agent 配置。
+//
+// 支持两种 JSON 格式：
+// 1. 扁平格式（向后兼容）：{"provider":"openai","model":"gpt-4o",...}
+// 2. 嵌套格式（
+//
+// 当嵌套字段存在时，嵌套字段优先于扁平字段。
 type Settings struct {
+	// 扁平字段（向后兼容）
 	Provider string `json:"provider"`
 	Model string `json:"model"`
 	MaxTurns int `json:"max_turns"`
@@ -26,6 +33,152 @@ type Settings struct {
 	CompactThreshold int `json:"compact_threshold"`
 	APIKey string `json:"api_key,omitempty"`
 	Extra map[string]any `json:"extra,omitempty"`
+
+	// 嵌套字段（
+	// 注意：JSON tag 使用 "-" 避免与扁平字段 "model" 冲突，
+	// 由自定义 UnmarshalJSON 处理 "model" key 的双格式解析。
+	ModelCfg *ModelConfig `json:"-"`
+	SkillsCfg *SkillsConfig `json:"skills,omitempty"`
+	MCPCfg *MCPConfig `json:"mcp,omitempty"`
+}
+
+// UnmarshalJSON 实现自定义 JSON 反序列化，支持 "model" 字段的两种格式：
+// 1. 字符串格式（扁平）："model": "gpt-4o" → Settings.Model = "gpt-4o"
+// 2. 对象格式（嵌套）："model": {"provider":"deepseek","name":"deepseek-chat"} → Settings.ModelCfg = &ModelConfig{...}
+func (s *Settings) UnmarshalJSON(data []byte) error {
+	// 先解析为通用 map
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// 处理 "model" 字段：先尝试解析为对象（嵌套格式），失败则解析为字符串（扁平格式）
+	if modelRaw, ok := raw["model"]; ok {
+		var mc ModelConfig
+		if err := json.Unmarshal(modelRaw, &mc); err == nil && (mc.Provider != "" || mc.Name != "") {
+			s.ModelCfg = &mc
+		} else {
+			var modelStr string
+			if err := json.Unmarshal(modelRaw, &modelStr); err == nil {
+				s.Model = modelStr
+			}
+		}
+		delete(raw, "model") // 避免重复处理
+	}
+
+	// 解析 "skills" 字段
+	if skillsRaw, ok := raw["skills"]; ok {
+		var sc SkillsConfig
+		if err := json.Unmarshal(skillsRaw, &sc); err == nil {
+			s.SkillsCfg = &sc
+		}
+		delete(raw, "skills")
+	}
+
+	// 解析 "mcp" 字段
+	if mcpRaw, ok := raw["mcp"]; ok {
+		var mc MCPConfig
+		if err := json.Unmarshal(mcpRaw, &mc); err == nil {
+			s.MCPCfg = &mc
+		}
+		delete(raw, "mcp")
+	}
+
+	// 解析扁平字段
+	if v, ok := raw["provider"]; ok {
+		_ = json.Unmarshal(v, &s.Provider)
+	}
+	if v, ok := raw["max_turns"]; ok {
+		_ = json.Unmarshal(v, &s.MaxTurns)
+	}
+	if v, ok := raw["workspace"]; ok {
+		_ = json.Unmarshal(v, &s.Workspace)
+	}
+	if v, ok := raw["compact_threshold"]; ok {
+		_ = json.Unmarshal(v, &s.CompactThreshold)
+	}
+	if v, ok := raw["api_key"]; ok {
+		_ = json.Unmarshal(v, &s.APIKey)
+	}
+	if v, ok := raw["extra"]; ok {
+		_ = json.Unmarshal(v, &s.Extra)
+	}
+
+	return nil
+}
+
+// ModelConfig
+type ModelConfig struct {
+	Provider string `json:"provider"`
+	Name string `json:"name"`
+	BaseURL string `json:"base_url,omitempty"`
+	APIKey string `json:"api_key,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+	Timeout *int `json:"timeout,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	MaxTokens *int `json:"max_tokens,omitempty"`
+}
+
+// SkillsConfig
+type SkillsConfig struct {
+	Dirs []string `json:"dirs"`
+	AutoDiscover *bool `json:"auto_discover,omitempty"`
+	Enabled *bool `json:"enabled,omitempty"`
+	Disabled []string `json:"disabled,omitempty"`
+}
+
+// MCPConfig
+type MCPConfig struct {
+	ConfigPath string `json:"config_path,omitempty"`
+}
+
+// IsAutoDiscoverEnabled 返回是否启用 Skill 自动发现。nil 默认 true。
+func (s *SkillsConfig) IsAutoDiscoverEnabled() bool {
+	return s == nil || s.AutoDiscover == nil || *s.AutoDiscover
+}
+
+// IsSkillsEnabled 返回是否启用 Skill 加载。nil 默认 true。
+func (s *SkillsConfig) IsSkillsEnabled() bool {
+	return s == nil || s.Enabled == nil || *s.Enabled
+}
+
+// GetEffectiveProvider 返回生效的 Provider 名称（嵌套优先）。
+func (s *Settings) GetEffectiveProvider() string {
+	if s.ModelCfg != nil && s.ModelCfg.Provider != "" {
+		return s.ModelCfg.Provider
+	}
+	return s.Provider
+}
+
+// GetEffectiveModel 返回生效的模型名称（嵌套优先）。
+func (s *Settings) GetEffectiveModel() string {
+	if s.ModelCfg != nil && s.ModelCfg.Name != "" {
+		return s.ModelCfg.Name
+	}
+	return s.Model
+}
+
+// GetEffectiveAPIKey 返回生效的 API Key（嵌套优先，支持 api_key_env 环境变量）。
+func (s *Settings) GetEffectiveAPIKey() string {
+	if s.ModelCfg != nil {
+		if s.ModelCfg.APIKey != "" {
+			return interpolateEnv(s.ModelCfg.APIKey)
+		}
+		if s.ModelCfg.APIKeyEnv != "" {
+			if v := os.Getenv(s.ModelCfg.APIKeyEnv); v != "" {
+				return v
+			}
+		}
+	}
+	return s.APIKey
+}
+
+// GetEffectiveBaseURL 返回生效的 Base URL（嵌套优先）。
+func (s *Settings) GetEffectiveBaseURL() string {
+	if s.ModelCfg != nil && s.ModelCfg.BaseURL != "" {
+		return interpolateEnv(s.ModelCfg.BaseURL)
+	}
+	return ""
 }
 
 // SettingsManager 管理多来源配置的加载与合并。
@@ -100,6 +253,27 @@ func (m *SettingsManager) Get() Settings {
 			result.Extra[k] = v
 		}
 	}
+	// 深拷贝嵌套字段
+	if m.settings.ModelCfg != nil {
+		mc := *m.settings.ModelCfg
+		result.ModelCfg = &mc
+	}
+	if m.settings.SkillsCfg != nil {
+		sc := *m.settings.SkillsCfg
+		if m.settings.SkillsCfg.Dirs != nil {
+			sc.Dirs = make([]string, len(m.settings.SkillsCfg.Dirs))
+			copy(sc.Dirs, m.settings.SkillsCfg.Dirs)
+		}
+		if m.settings.SkillsCfg.Disabled != nil {
+			sc.Disabled = make([]string, len(m.settings.SkillsCfg.Disabled))
+			copy(sc.Disabled, m.settings.SkillsCfg.Disabled)
+		}
+		result.SkillsCfg = &sc
+	}
+	if m.settings.MCPCfg != nil {
+		mc := *m.settings.MCPCfg
+		result.MCPCfg = &mc
+	}
 	return result
 }
 
@@ -137,10 +311,15 @@ func loadFromFile(path string) (*Settings, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
-	// 对字符串字段执行环境变量插值（$ENV_VAR / ${ENV_VAR}）。
+	// 对扁平字符串字段执行环境变量插值（$ENV_VAR / ${ENV_VAR}）。
 	s.Provider = interpolateEnv(s.Provider)
 	s.Model = interpolateEnv(s.Model)
 	s.Workspace = interpolateEnv(s.Workspace)
 	s.APIKey = interpolateEnv(s.APIKey)
+	// 对嵌套 ModelConfig 字段执行环境变量插值
+	if s.ModelCfg != nil {
+		s.ModelCfg.BaseURL = interpolateEnv(s.ModelCfg.BaseURL)
+		s.ModelCfg.APIKey = interpolateEnv(s.ModelCfg.APIKey)
+	}
 	return &s, nil
 }

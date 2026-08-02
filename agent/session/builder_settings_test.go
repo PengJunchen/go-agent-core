@@ -44,7 +44,7 @@ func TestNewBuilderFromSettings_AutoProvider(t *testing.T) {
 		Model: "test-model",
 	}
 
-	b := NewBuilderFromSettings(settings)
+	b := NewBuilderFromSettings(settings, "")
 
 	if b.err != nil {
 		t.Fatalf("unexpected error: %v", b.err)
@@ -72,7 +72,7 @@ func TestNewBuilderFromSettings_AutoMCP(t *testing.T) {
 		},
 	}
 
-	b := NewBuilderFromSettings(settings)
+	b := NewBuilderFromSettings(settings, "")
 
 	if b.err != nil {
 		t.Fatalf("unexpected error: %v", b.err)
@@ -104,7 +104,7 @@ func TestNewBuilderFromSettings_AutoTools(t *testing.T) {
 		},
 	}
 
-	b := NewBuilderFromSettings(settings)
+	b := NewBuilderFromSettings(settings, "")
 
 	if b.err != nil {
 		t.Fatalf("unexpected error: %v", b.err)
@@ -129,7 +129,7 @@ func TestNewBuilderFromSettings_BackwardCompat(t *testing.T) {
 		CompactThreshold: 5000,
 	}
 
-	b := NewBuilderFromSettings(settings)
+	b := NewBuilderFromSettings(settings, "")
 
 	if b.err != nil {
 		t.Fatalf("unexpected error: %v", b.err)
@@ -158,7 +158,7 @@ func TestNewBuilderFromSettings_UnknownProvider(t *testing.T) {
 		Model: "some-model",
 	}
 
-	b := NewBuilderFromSettings(settings)
+	b := NewBuilderFromSettings(settings, "")
 
 	if b.err == nil {
 		t.Fatal("expected error for unknown provider")
@@ -191,7 +191,7 @@ func TestNewBuilderFromSettings_FullBuild(t *testing.T) {
 		},
 	}
 
-	b := NewBuilderFromSettings(settings)
+	b := NewBuilderFromSettings(settings, "")
 	if b.err != nil {
 		t.Fatalf("unexpected error: %v", b.err)
 	}

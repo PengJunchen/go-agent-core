@@ -1,2 +1,22 @@
-cover*.out
+# Build output
+bin/
+*.exe
 *.test
+cover*.out
+
+# go-agent local config (may contain API keys)
+.go-agent/
+
+# Office documents (use docs repo instead)
+*.docx
+*.doc
+*.xlsx
+*.pptx
+
+# Runtime test logs
+test_logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp

@@ -49,7 +49,7 @@ func TestLoadAndAssemble_AutoSelectProvider(t *testing.T) {
 		Model: "test-model-v1",
 	}
 
-	ac, err := LoadAndAssemble(settings)
+	ac, err := LoadAndAssemble(settings, "")
 	if err != nil {
 		t.Fatalf("LoadAndAssemble: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestLoadAndAssemble_AutoLoadMCPServers(t *testing.T) {
 		},
 	}
 
-	ac, err := LoadAndAssemble(settings)
+	ac, err := LoadAndAssemble(settings, "")
 	if err != nil {
 		t.Fatalf("LoadAndAssemble: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestLoadAndAssemble_AutoRegisterTools(t *testing.T) {
 		},
 	}
 
-	ac, err := LoadAndAssemble(settings)
+	ac, err := LoadAndAssemble(settings, "")
 	if err != nil {
 		t.Fatalf("LoadAndAssemble: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestLoadAndAssemble_BackwardCompat(t *testing.T) {
 		CompactThreshold: 5000,
 	}
 
-	ac, err := LoadAndAssemble(settings)
+	ac, err := LoadAndAssemble(settings, "")
 	if err != nil {
 		t.Fatalf("LoadAndAssemble: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestLoadAndAssemble_UnknownProvider(t *testing.T) {
 		Model: "some-model",
 	}
 
-	_, err := LoadAndAssemble(settings)
+	_, err := LoadAndAssemble(settings, "")
 	if err == nil {
 		t.Error("expected error for unknown provider")
 	}
@@ -188,7 +188,7 @@ func TestLoadAndAssemble_UnknownTool(t *testing.T) {
 		},
 	}
 
-	_, err := LoadAndAssemble(settings)
+	_, err := LoadAndAssemble(settings, "")
 	if err == nil {
 		t.Error("expected error for unknown tool name")
 	}
@@ -207,7 +207,7 @@ func TestLoadAndAssemble_MCPMissingName(t *testing.T) {
 		},
 	}
 
-	_, err := LoadAndAssemble(settings)
+	_, err := LoadAndAssemble(settings, "")
 	if err == nil {
 		t.Error("expected error for MCP server missing name")
 	}
