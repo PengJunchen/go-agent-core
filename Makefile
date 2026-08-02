@@ -84,7 +84,7 @@ test-leak:
 
 # AST scanning
 scan:
-	cd verify/cmd/scanner && $(GOCMD) run . -dir .. -format text
+	cd verify/cmd/scanner && $(GOCMD) run . -dir ..
 
 # Full verification pipeline
 verify: build test-race test-log test-leak test-vrules scan test-e2e
@@ -92,7 +92,7 @@ verify: build test-race test-log test-leak test-vrules scan test-e2e
 
 # Generate reports
 report:
-	cd verify/cmd/scanner && $(GOCMD) run . -dir .. -format json > ../verify-scan.json
+	cd verify/cmd/scanner && $(GOCMD) run . -dir .. > ../verify-scan.json
 	$(GOTEST) -json -race -count=1 ./... > verify-test.json 2>/dev/null
 	@echo "Reports generated: verify-scan.json, verify-test.json"
 

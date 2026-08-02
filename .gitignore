@@ -16,6 +16,9 @@ cover*.out
 # Runtime test logs
 test_logs/
 
+# E2E testing (symlink to infra repo)
+e2e_testing/
+
 # IDE
 .idea/
 .vscode/

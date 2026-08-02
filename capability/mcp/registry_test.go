@@ -37,8 +37,8 @@ func TestRegistry_RegisterFactoryOverride(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: test
- type: stdio
- command: echo
+   type: stdio
+   command: echo
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML: %v", err)
@@ -57,7 +57,7 @@ func TestRegistry_RegisterFactoryNewType(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: mycustom
- type: custom
+   type: custom
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML with custom type: %v", err)
@@ -147,12 +147,12 @@ func TestRegistry_LoadFromYAML_Stdio(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: github
- type: stdio
- command: gh
- args: ["api", "mcp"]
- env:
- GITHUB_TOKEN: "xxx"
- timeout: 30s
+   type: stdio
+   command: gh
+   args: ["api", "mcp"]
+   env:
+     GITHUB_TOKEN: "xxx"
+   timeout: 30s
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML: %v", err)
@@ -185,11 +185,11 @@ func TestRegistry_LoadFromYAML_HTTP(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: sentry
- type: http
- url: "https://mcp.sentry.dev/mcp"
- headers:
- Authorization: "Bearer token"
- timeout: 15s
+   type: http
+   url: "https://mcp.sentry.dev/mcp"
+   headers:
+     Authorization: "Bearer token"
+   timeout: 15s
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML: %v", err)
@@ -219,8 +219,8 @@ func TestRegistry_LoadFromYAML_SSE(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: myserver
- type: sse
- url: "https://example.com/sse"
+   type: sse
+   url: "https://example.com/sse"
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML: %v", err)
@@ -244,8 +244,8 @@ func TestRegistry_LoadFromYAML_StreamableHTTP(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: stream
- type: streamable_http
- url: "https://example.com/mcp"
+   type: streamable_http
+   url: "https://example.com/mcp"
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML: %v", err)
@@ -265,12 +265,12 @@ func TestRegistry_LoadFromYAML_Multiple(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: github
- type: stdio
- command: gh
- args: ["api", "mcp"]
+   type: stdio
+   command: gh
+   args: ["api", "mcp"]
  - name: sentry
- type: http
- url: "https://mcp.sentry.dev/mcp"
+   type: http
+   url: "https://mcp.sentry.dev/mcp"
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML: %v", err)
@@ -299,7 +299,7 @@ func TestRegistry_LoadFromYAML_MissingName(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - type: stdio
- command: echo
+   command: echo
 `))
 	if err == nil {
 		t.Error("expected error for missing name")
@@ -312,7 +312,7 @@ func TestRegistry_LoadFromYAML_UnknownType(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: bad
- type: websocket
+   type: websocket
 `))
 	if err == nil {
 		t.Error("expected error for unknown type")
@@ -325,7 +325,7 @@ func TestRegistry_LoadFromYAML_StdioMissingCommand(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: nocmd
- type: stdio
+   type: stdio
 `))
 	if err == nil {
 		t.Error("expected error for missing command")
@@ -338,7 +338,7 @@ func TestRegistry_LoadFromYAML_HTTPMissingURL(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: nourl
- type: http
+   type: http
 `))
 	if err == nil {
 		t.Error("expected error for missing url")
@@ -351,7 +351,7 @@ func TestRegistry_LoadFromYAML_SSEMissingURL(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: nourl
- type: sse
+   type: sse
 `))
 	if err == nil {
 		t.Error("expected error for missing url")
@@ -364,9 +364,9 @@ func TestRegistry_LoadFromYAML_InvalidTimeout(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: badtime
- type: stdio
- command: echo
- timeout: not-a-duration
+   type: stdio
+   command: echo
+   timeout: not-a-duration
 `))
 	if err == nil {
 		t.Error("expected error for invalid timeout")
@@ -380,8 +380,8 @@ func TestRegistry_LoadFromFile(t *testing.T) {
 	err := os.WriteFile(cfgPath, []byte(`
 mcp_servers:
  - name: filetest
- type: stdio
- command: echo
+   type: stdio
+   command: echo
 `), 0o644)
 	if err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -441,8 +441,8 @@ func TestRegistry_TypeCaseInsensitive(t *testing.T) {
 	err := r.LoadFromYAML([]byte(`
 mcp_servers:
  - name: upper
- type: STDIO
- command: echo
+   type: STDIO
+   command: echo
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML with uppercase type: %v", err)
@@ -629,49 +629,49 @@ func TestDefaultMCPProvider_ListToolsMultipleServers(t *testing.T) {
 // Def-008: buildTransportFromConfig 各类型构建。
 func TestBuildTransportFromConfig(t *testing.T) {
 	tests := []struct {
-		name string
-		config MCPServerConfig
-		want string // 期望的 Transport 类型名
+		name    string
+		config  MCPServerConfig
+		want    string // 期望的 Transport 类型名
 		wantErr bool
 	}{
 		{
-			name: "stdio",
+			name:   "stdio",
 			config: MCPServerConfig{Name: "s", Type: "stdio", Command: "echo"},
-			want: "*mcp.StdioMCPProvider",
+			want:   "*mcp.StdioMCPProvider",
 		},
 		{
-			name: "http",
+			name:   "http",
 			config: MCPServerConfig{Name: "h", Type: "http", URL: "http://x"},
-			want: "*mcp.HTTPMCPProvider",
+			want:   "*mcp.HTTPMCPProvider",
 		},
 		{
-			name: "streamable_http",
+			name:   "streamable_http",
 			config: MCPServerConfig{Name: "sh", Type: "streamable_http", URL: "http://x"},
-			want: "*mcp.HTTPMCPProvider",
+			want:   "*mcp.HTTPMCPProvider",
 		},
 		{
-			name: "sse",
+			name:   "sse",
 			config: MCPServerConfig{Name: "se", Type: "sse", URL: "http://x/sse"},
-			want: "*mcp.SSEMCPProvider",
+			want:   "*mcp.SSEMCPProvider",
 		},
 		{
-			name: "stdio missing command",
-			config: MCPServerConfig{Name: "s", Type: "stdio"},
+			name:    "stdio missing command",
+			config:  MCPServerConfig{Name: "s", Type: "stdio"},
 			wantErr: true,
 		},
 		{
-			name: "http missing url",
-			config: MCPServerConfig{Name: "h", Type: "http"},
+			name:    "http missing url",
+			config:  MCPServerConfig{Name: "h", Type: "http"},
 			wantErr: true,
 		},
 		{
-			name: "sse missing url",
-			config: MCPServerConfig{Name: "se", Type: "sse"},
+			name:    "sse missing url",
+			config:  MCPServerConfig{Name: "se", Type: "sse"},
 			wantErr: true,
 		},
 		{
-			name: "unknown type",
-			config: MCPServerConfig{Name: "u", Type: "unknown"},
+			name:    "unknown type",
+			config:  MCPServerConfig{Name: "u", Type: "unknown"},
 			wantErr: true,
 		},
 	}
@@ -699,7 +699,7 @@ func TestBuildTransportFromConfig(t *testing.T) {
 
 // noopTransport 是无操作的 Transport，用于测试注册和路由。
 type noopTransport struct {
-	tools []Tool
+	tools  []Tool
 	closed bool
 }
 
