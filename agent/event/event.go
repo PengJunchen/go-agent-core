@@ -37,6 +37,12 @@ const (
 	EventApprovalRequest
 	// EventToolExecutionUpdate 工具执行状态更新。
 	EventToolExecutionUpdate
+	// EventMessageStart 消息开始（LLM 响应开始）。
+	EventMessageStart
+	// EventMessageUpdate 消息更新（文本/思维增量）。
+	EventMessageUpdate
+	// EventMessageEnd 消息结束（LLM 响应完成）。
+	EventMessageEnd
 )
 
 // ToolExecutionUpdate 是 EventToolExecutionUpdate 事件的载荷。
@@ -46,6 +52,23 @@ type ToolExecutionUpdate struct {
 	Status string // "started", "progress", "completed", "failed"
 	Progress float64 // 0.0 - 1.0，可选进度指示
 	Message string // 可选状态消息
+}
+
+// MessageUpdateType 标识消息更新的类型。
+type MessageUpdateType string
+
+const (
+	// MessageUpdateText 文本增量。
+	MessageUpdateText MessageUpdateType = "text"
+	// MessageUpdateThinking 思维增量。
+	MessageUpdateThinking MessageUpdateType = "thinking"
+)
+
+// MessageUpdatePayload 是 EventMessageUpdate 事件的载荷，
+// 包装 EventTextDelta / EventThinkingDelta 的增量内容。
+type MessageUpdatePayload struct {
+	Type MessageUpdateType
+	Content string
 }
 
 // AgentEvent 是一个 Agent 事件。
